@@ -1,0 +1,6 @@
+groq
+requests
+pandas
+numpy
+scipy
+matplotlib
