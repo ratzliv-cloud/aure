@@ -1,4 +1,4 @@
-# BOT TRADING V99.32 – GROQ (MULTI-TRADES + BARRIDOS DE LIQUIDEZ/FAKEOUTS)
+# BOT TRADING V99.32 – GROQ (MULTI-TRADES + BARRIDOS DE LIQUIDEZ/FAKEOUTS) - CORREGIDO
 # ==============================================================================
 import os, time, requests, json, re, numpy as np, pandas as pd
 from scipy.stats import linregress
@@ -61,6 +61,9 @@ def cargar_memoria():
         print("Error cargando memoria:", e)
 
 def parse_json_seguro(raw):
+    if not raw or raw.strip() == "":
+        print("⚠️ Respuesta vacía de IA")
+        return None
     try:
         match = re.search(r'\{.*\}', raw, re.DOTALL)
         json_str = match.group(0) if match else raw
@@ -69,7 +72,7 @@ def parse_json_seguro(raw):
         return json.loads(json_str)
     except Exception as e:
         print("⚠️ Error JSON:", e)
-        print("RAW:", raw)
+        print("RAW:", raw[:200])
         return None
 # =================================================
 
@@ -131,18 +134,49 @@ def telegram_enviar_imagen(ruta_imagen, caption=""):
     except Exception as e:
         print(f"Error imagen: {e}")
 
-# =================== DATOS E INDICADORES ===================
+# =================== DATOS E INDICADORES (CORREGIDO) ===================
 def obtener_velas(limit=150):
-    r = requests.get(f"{BASE_URL}/v5/market/kline", params={"category": "linear", "symbol": SYMBOL, "interval": INTERVAL, "limit": limit}, timeout=20)
-    data = r.json()["result"]["list"][::-1]
-    df = pd.DataFrame(data, columns=['time','open','high','low','close','volume','turnover'])
-    for col in ['open','high','low','close','volume']:
-        df[col] = df[col].astype(float)
-    df['time'] = pd.to_datetime(df['time'].astype(np.int64), unit='ms', utc=True)
-    df.set_index('time', inplace=True)
-    return df
+    try:
+        r = requests.get(f"{BASE_URL}/v5/market/kline", params={"category": "linear", "symbol": SYMBOL, "interval": INTERVAL, "limit": limit}, timeout=20)
+        data_json = r.json()
+        
+        # Verificar si la respuesta es exitosa
+        if data_json.get("retCode") != 0:
+            error_msg = data_json.get("retMsg", "Error desconocido")
+            print(f"❌ Error Bybit API: {error_msg}")
+            return pd.DataFrame()  # DataFrame vacío
+        
+        result = data_json.get("result")
+        if result is None:
+            print("❌ No hay 'result' en la respuesta de Bybit")
+            return pd.DataFrame()
+        
+        # Bybit v5 devuelve 'list' dentro de 'result'
+        if "list" not in result:
+            print(f"❌ La clave 'list' no existe. Respuesta: {list(result.keys())}")
+            return pd.DataFrame()
+        
+        lista_velas = result["list"]
+        if not lista_velas:
+            print("❌ Lista de velas vacía")
+            return pd.DataFrame()
+        
+        # Invertir para orden cronológico (más antigua primero)
+        lista_velas = lista_velas[::-1]
+        
+        df = pd.DataFrame(lista_velas, columns=['time','open','high','low','close','volume','turnover'])
+        for col in ['open','high','low','close','volume']:
+            df[col] = df[col].astype(float)
+        df['time'] = pd.to_datetime(df['time'].astype(np.int64), unit='ms', utc=True)
+        df.set_index('time', inplace=True)
+        return df
+    except Exception as e:
+        print(f"❌ Excepción en obtener_velas: {e}")
+        return pd.DataFrame()
 
 def calcular_indicadores(df):
+    if df.empty:
+        return df
     df['ema20'] = df['close'].ewm(span=20).mean()
     df['ema50'] = df['close'].ewm(span=50).mean()
     tr = pd.concat([(df['high'] - df['low']), (df['high'] - df['close'].shift()).abs(), (df['low'] - df['close'].shift()).abs()], axis=1).max(axis=1)
@@ -154,6 +188,8 @@ def calcular_indicadores(df):
     return df.dropna()
 
 def detectar_zonas_mercado(df, idx=-2, ventana_macro=120):
+    if df.empty or len(df) < 40:
+        return 0, 0, 0, 0, "LATERAL", "LATERAL"
     df_eval = df if idx == -1 else df.iloc[:idx+1]
     soporte = df_eval['low'].rolling(40).min().iloc[-1]
     resistencia = df_eval['high'].rolling(40).max().iloc[-1]
@@ -175,7 +211,7 @@ def analizar_anatomia_vela(v):
     return f"{color} (Cuerpo:{c_pct:.0f}% | M.Sup:{s_sup:.0f}% | M.Inf:{s_inf:.0f}%)"
 
 def analizar_patrones_conjuntos(df, idx):
-    if idx < 3: return "Datos insuficientes"
+    if idx < 3 or df.empty: return "Datos insuficientes"
     v3, v2, v1 = df.iloc[idx], df.iloc[idx-1], df.iloc[idx-2]
 
     r3 = v3['high'] - v3['low']
@@ -203,6 +239,8 @@ def analizar_patrones_conjuntos(df, idx):
     return " | ".join(patrones) if patrones else "Formación de consolidación normal"
 
 def generar_descripcion_nison(df, idx=-2):
+    if df.empty or len(df) < abs(idx)+1:
+        return "Datos insuficientes para descripción", 0
     vela_actual = df.iloc[idx]
     precio = vela_actual['close']
     atr = df['atr'].iloc[idx]
@@ -211,9 +249,9 @@ def generar_descripcion_nison(df, idx=-2):
     soporte, resistencia, slope, intercept, tendencia, micro = detectar_zonas_mercado(df, idx)
     patrones_generales = analizar_patrones_conjuntos(df, idx)
 
-    anat_v1 = analizar_anatomia_vela(df.iloc[idx-2])
-    anat_v2 = analizar_anatomia_vela(df.iloc[idx-1])
-    anat_v3 = analizar_anatomia_vela(df.iloc[idx])
+    anat_v1 = analizar_anatomia_vela(df.iloc[idx-2]) if idx-2 >= 0 else "N/A"
+    anat_v2 = analizar_anatomia_vela(df.iloc[idx-1]) if idx-1 >= 0 else "N/A"
+    anat_v3 = analizar_anatomia_vela(df.iloc[idx]) if idx >= 0 else "N/A"
 
     margen_fakeout = atr * 0.4
     if precio > ema20:
@@ -310,6 +348,9 @@ def analizar_con_groq_texto(descripcion, atr, reglas_aprendidas):
             temperature=0.1, max_tokens=400
         )
         raw = respuesta.choices[0].message.content
+        if not raw or raw.strip() == "":
+            return "Hold", ["Respuesta vacía de IA"], "", (DEFAULT_SL_MULT, DEFAULT_TP1_MULT, DEFAULT_TRAILING_MULT)
+
         datos = parse_json_seguro(raw)
         if not datos:
             return "Hold", ["JSON inválido"], "", (DEFAULT_SL_MULT, DEFAULT_TP1_MULT, DEFAULT_TRAILING_MULT)
@@ -355,6 +396,8 @@ def aprender_de_trades():
     try:
         respuesta = client.chat.completions.create(model=MODELO_TEXTO, messages=[{"role": "system", "content": system_msg}, {"role": "user", "content": user_msg}], temperature=0.3, max_tokens=500)
         raw = respuesta.choices[0].message.content
+        if not raw:
+            return
         datos = parse_json_seguro(raw)
         if not datos:
             return
@@ -379,6 +422,8 @@ def aprender_de_trades():
 
 # =================== GRÁFICOS MULTI-TRADE ===================
 def generar_grafico(df, trade_info, soporte, resistencia, slope, intercept, tipo="Entrada"):
+    if df.empty:
+        return None
     df_plot = df.tail(GRAFICO_VELAS_LIMIT).copy()
     x = np.arange(len(df_plot))
     fig, ax = plt.subplots(figsize=(16,8))
@@ -484,11 +529,15 @@ Entrada: {precio:.2f}
     telegram_mensaje(msg)
 
     ruta_img = generar_grafico(df, trade, sop, res, slo, inter, "Entrada")
-    telegram_enviar_imagen(ruta_img, f"🚀 [TRADE #{TRADE_COUNTER}] {decision.upper()}\n{razones[0]}")
+    if ruta_img:
+        telegram_enviar_imagen(ruta_img, f"🚀 [TRADE #{TRADE_COUNTER}] {decision.upper()}\n{razones[0] if razones else ''}")
     return True
 
 def paper_revisar_sl_tp(df, sop, res, slo, inter):
     global PAPER_BALANCE, PAPER_WIN, PAPER_LOSS, PAPER_TRADES_TOTALES, TRADE_HISTORY
+
+    if df.empty:
+        return
 
     h = df['high'].iloc[-1]
     l = df['low'].iloc[-1]
@@ -566,7 +615,8 @@ def paper_revisar_sl_tp(df, sop, res, slo, inter):
             print(msg_cierre)
 
             ruta_img = generar_grafico(df, t, sop, res, slo, inter, "Salida")
-            telegram_enviar_imagen(ruta_img, msg_cierre)
+            if ruta_img:
+                telegram_enviar_imagen(ruta_img, msg_cierre)
 
     for t_id in trades_a_cerrar:
         del PAPER_ACTIVE_TRADES[t_id]
@@ -584,7 +634,18 @@ def run_bot():
     ultima_vela = None
     while True:
         try:
-            df = calcular_indicadores(obtener_velas())
+            df_raw = obtener_velas()
+            if df_raw.empty:
+                print("⚠️ No se pudieron obtener velas. Reintentando en 60s...")
+                time.sleep(60)
+                continue
+
+            df = calcular_indicadores(df_raw)
+            if df.empty:
+                print("⚠️ DataFrame vacío tras calcular indicadores.")
+                time.sleep(60)
+                continue
+
             vela_cerrada = df.index[-2]
             precio = df['close'].iloc[-1]
             atr = df['atr'].iloc[-1]
