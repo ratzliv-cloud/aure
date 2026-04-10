@@ -61,18 +61,58 @@ def cargar_memoria():
         print("Error cargando memoria:", e)
 
 def parse_json_seguro(raw):
+    """Extrae y limpia un JSON de la respuesta de la IA, manejando saltos de línea y caracteres no escapados."""
     if not raw or raw.strip() == "":
         print("⚠️ Respuesta vacía de IA")
         return None
     try:
-        match = re.search(r'\{.*\}', raw, re.DOTALL)
-        json_str = match.group(0) if match else raw
+        # Buscar el primer '{' y el último '}' balanceado
+        stack = []
+        start = raw.find('{')
+        if start == -1:
+            print("⚠️ No se encontró '{' en la respuesta")
+            return None
+        end = start
+        for i, ch in enumerate(raw[start:], start):
+            if ch == '{':
+                stack.append(ch)
+            elif ch == '}':
+                if stack:
+                    stack.pop()
+                    if not stack:
+                        end = i
+                        break
+        if not stack and end > start:
+            json_str = raw[start:end+1]
+        else:
+            # fallback: extraer con regex simple
+            match = re.search(r'\{.*\}', raw, re.DOTALL)
+            if not match:
+                print("⚠️ No se pudo extraer bloque JSON")
+                return None
+            json_str = match.group(0)
+
+        # Escapar saltos de línea dentro de strings (entre comillas dobles)
+        def escape_newlines_in_strings(match):
+            content = match.group(0)
+            # Reemplazar \n literal (no escapado) por \\n
+            content = content.replace('\n', '\\n').replace('\r', '\\r')
+            return content
+
+        # Aplicar solo a partes que están dentro de comillas dobles
+        json_str = re.sub(r'"(?:[^"\\]|\\.)*"', escape_newlines_in_strings, json_str)
+
+        # Eliminar caracteres de control no deseados (excepto los ya escapados)
         json_str = re.sub(r'[\x00-\x1f\x7f]', '', json_str)
-        json_str = json_str.replace("'", '"')
+
         return json.loads(json_str)
+
+    except json.JSONDecodeError as e:
+        print(f"⚠️ Error JSON después de limpieza: {e}")
+        print("RAW (primeros 300):", raw[:300])
+        return None
     except Exception as e:
-        print("⚠️ Error JSON:", e)
-        print("RAW:", raw[:200])
+        print(f"⚠️ Error general parseando JSON: {e}")
         return None
 # =================================================
 
@@ -330,6 +370,8 @@ def analizar_con_groq_texto(descripcion, atr, reglas_aprendidas):
         - Puedes operar Reversiones, Continuaciones, Rompimientos o Trampas de Liquidez en CUALQUIER zona del gráfico si la suma del contexto lo apoya.
         - NO ignores la vela actual. Si el contexto es alcista pero la vela actual es una gran Estrella Fugaz (Oso), se anulan y es "Hold".
         
+        IMPORTANTE: Todos los strings en el JSON DEBEN ser de una sola línea (sin saltos de línea literales). Si necesitas un salto de línea, escríbelo como '\\n'.
+        
         Responde ÚNICAMENTE con un JSON válido en este formato:
         {{
           "decision": "Buy/Sell/Hold",
@@ -345,7 +387,8 @@ def analizar_con_groq_texto(descripcion, atr, reglas_aprendidas):
         respuesta = client.chat.completions.create(
             model=MODELO_TEXTO,
             messages=[{"role": "system", "content": system_msg}, {"role": "user", "content": user_msg}],
-            temperature=0.1, max_tokens=400
+            temperature=0.1,
+            max_tokens=600  # Aumentado de 400 para evitar truncamiento
         )
         raw = respuesta.choices[0].message.content
         if not raw or raw.strip() == "":
