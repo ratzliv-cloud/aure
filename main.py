@@ -1,4 +1,4 @@
-# BOT TRADING V99.32 – GROQ (MULTI-TRADES + BARRIDOS DE LIQUIDEZ/FAKEOUTS) - CORREGIDO
+# BOT TRADING V99.33 – GROQ (MULTI-TRADES + BARRIDOS) - MODELO 120B + MEMORIA FIX
 # ==============================================================================
 import os, time, requests, json, re, numpy as np, pandas as pd
 from scipy.stats import linregress
@@ -12,7 +12,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise ValueError("Falta GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
-MODELO_TEXTO = "openai/gpt-oss-20b"   # ← CAMBIADO a 20B (más rápido y económico, igual capacidad analítica)
+MODELO_TEXTO = "openai/gpt-oss-120b"   # ← Modelo que mejor funciona
 
 # ====== MEJORAS IA (MEMORIA + JSON ROBUSTO) ======
 MEMORY_FILE = "memoria_bot.json"
@@ -46,19 +46,12 @@ def guardar_memoria():
         "PAPER_LOSS": PAPER_LOSS,
         "PAPER_TRADES_TOTALES": PAPER_TRADES_TOTALES
     }
-    # Convertir cualquier tipo no serializable a nativo de Python
     data_serializable = convertir_serializable(data)
     try:
         with open(MEMORY_FILE, "w") as f:
             json.dump(data_serializable, f, indent=4)
     except Exception as e:
         print(f"Error guardando memoria: {e}")
-        # Debug: mostrar qué campo causó el error
-        for k, v in data_serializable.items():
-            try:
-                json.dumps({k: v})
-            except Exception as e2:
-                print(f"  Campo problemático: {k} -> {type(v)} - {e2}")
 
 def cargar_memoria():
     global TRADE_HISTORY, REGLAS_APRENDIDAS
@@ -86,16 +79,15 @@ def cargar_memoria():
         print(f"Error cargando memoria: {e}")
 
 def parse_json_seguro(raw):
-    """Extrae y limpia un JSON de la respuesta de la IA, manejando saltos de línea y caracteres no escapados."""
+    """Extrae y limpia un JSON de la respuesta de la IA."""
     if not raw or raw.strip() == "":
         print("⚠️ Respuesta vacía de IA")
         return None
     try:
-        # Buscar el primer '{' y el último '}' balanceado
         stack = []
         start = raw.find('{')
         if start == -1:
-            print("⚠️ No se encontró '{' en la respuesta")
+            print("⚠️ No se encontró '{'")
             return None
         end = start
         for i, ch in enumerate(raw[start:], start):
@@ -110,33 +102,23 @@ def parse_json_seguro(raw):
         if not stack and end > start:
             json_str = raw[start:end+1]
         else:
-            # fallback: extraer con regex simple
             match = re.search(r'\{.*\}', raw, re.DOTALL)
             if not match:
-                print("⚠️ No se pudo extraer bloque JSON")
                 return None
             json_str = match.group(0)
 
-        # Escapar saltos de línea dentro de strings (entre comillas dobles)
         def escape_newlines_in_strings(match):
             content = match.group(0)
-            content = content.replace('\n', '\\n').replace('\r', '\\r')
-            return content
+            return content.replace('\n', '\\n').replace('\r', '\\r')
 
         json_str = re.sub(r'"(?:[^"\\]|\\.)*"', escape_newlines_in_strings, json_str)
         json_str = re.sub(r'[\x00-\x1f\x7f]', '', json_str)
-
         return json.loads(json_str)
-
-    except json.JSONDecodeError as e:
-        print(f"⚠️ Error JSON después de limpieza: {e}")
-        print("RAW (primeros 300):", raw[:300])
-        return None
     except Exception as e:
-        print(f"⚠️ Error general parseando JSON: {e}")
+        print(f"⚠️ Error parseando JSON: {e}")
         return None
-# =================================================
 
+# =================== CONFIGURACIÓN ===================
 SYMBOL = "BTCUSDT"
 INTERVAL = "5"
 RISK_PER_TRADE = 0.02
@@ -195,33 +177,18 @@ def telegram_enviar_imagen(ruta_imagen, caption=""):
     except Exception as e:
         print(f"Error imagen: {e}")
 
-# =================== DATOS E INDICADORES (CORREGIDO) ===================
+# =================== DATOS E INDICADORES ===================
 def obtener_velas(limit=150):
     try:
         r = requests.get(f"{BASE_URL}/v5/market/kline", params={"category": "linear", "symbol": SYMBOL, "interval": INTERVAL, "limit": limit}, timeout=20)
         data_json = r.json()
-        
         if data_json.get("retCode") != 0:
-            error_msg = data_json.get("retMsg", "Error desconocido")
-            print(f"❌ Error Bybit API: {error_msg}")
+            print(f"❌ Error Bybit API: {data_json.get('retMsg')}")
             return pd.DataFrame()
-        
         result = data_json.get("result")
-        if result is None:
-            print("❌ No hay 'result' en la respuesta de Bybit")
+        if result is None or "list" not in result:
             return pd.DataFrame()
-        
-        if "list" not in result:
-            print(f"❌ La clave 'list' no existe. Respuesta: {list(result.keys())}")
-            return pd.DataFrame()
-        
-        lista_velas = result["list"]
-        if not lista_velas:
-            print("❌ Lista de velas vacía")
-            return pd.DataFrame()
-        
-        lista_velas = lista_velas[::-1]
-        
+        lista_velas = result["list"][::-1]
         df = pd.DataFrame(lista_velas, columns=['time','open','high','low','close','volume','turnover'])
         for col in ['open','high','low','close','volume']:
             df[col] = df[col].astype(float)
@@ -229,7 +196,7 @@ def obtener_velas(limit=150):
         df.set_index('time', inplace=True)
         return df
     except Exception as e:
-        print(f"❌ Excepción en obtener_velas: {e}")
+        print(f"❌ Excepción obtener_velas: {e}")
         return pd.DataFrame()
 
 def calcular_indicadores(df):
@@ -237,7 +204,7 @@ def calcular_indicadores(df):
         return df
     df['ema20'] = df['close'].ewm(span=20).mean()
     df['ema50'] = df['close'].ewm(span=50).mean()
-    tr = pd.concat([(df['high'] - df['low']), (df['high'] - df['close'].shift()).abs(), (df['low'] - df['close'].shift()).abs()], axis=1).max(axis=1)
+    tr = pd.concat([(df['high']-df['low']), (df['high']-df['close'].shift()).abs(), (df['low']-df['close'].shift()).abs()], axis=1).max(axis=1)
     df['atr'] = tr.rolling(14).mean()
     delta = df['close'].diff()
     gain = delta.where(delta > 0, 0).rolling(14).mean()
@@ -271,7 +238,6 @@ def analizar_anatomia_vela(v):
 def analizar_patrones_conjuntos(df, idx):
     if idx < 3 or df.empty: return "Datos insuficientes"
     v3, v2, v1 = df.iloc[idx], df.iloc[idx-1], df.iloc[idx-2]
-
     r3 = v3['high'] - v3['low']
     c3_pct = (abs(v3['close'] - v3['open']) / r3) * 100 if r3 > 0 else 0
     sup3 = ((v3['high'] - max(v3['close'], v3['open'])) / r3) * 100 if r3 > 0 else 0
@@ -279,7 +245,6 @@ def analizar_patrones_conjuntos(df, idx):
     verde3 = v3['close'] > v3['open']
     verde2 = v2['close'] > v2['open']
     verde1 = v1['close'] > v1['open']
-
     patrones = []
     if not verde1 and verde3 and v3['close'] > (v1['open']+v1['close'])/2: patrones.append("🌟 ESTRELLA DE LA MAÑANA")
     if verde1 and not verde3 and v3['close'] < (v1['open']+v1['close'])/2: patrones.append("🌟 ESTRELLA DEL ATARDECER")
@@ -287,13 +252,11 @@ def analizar_patrones_conjuntos(df, idx):
     if not verde1 and not verde2 and not verde3 and v3['close'] < v2['close'] and v2['close'] < v1['close']: patrones.append("🩸 TRES CUERVOS NEGROS")
     if not verde2 and verde3 and v3['close'] > v2['open'] and v3['open'] < v2['close']: patrones.append("🐂 ENVOLVENTE ALCISTA")
     if verde2 and not verde3 and v3['close'] < v2['open'] and v3['open'] > v2['close']: patrones.append("🐻 ENVOLVENTE BAJISTA")
-
     if verde3 and c3_pct > 70 and sup3 < 10: patrones.append("📈 VELA SÓLIDA EN MÁXIMOS (Toros controlan)")
     elif not verde3 and c3_pct > 70 and inf3 < 10: patrones.append("📉 VELA SÓLIDA EN MÍNIMOS (Osos controlan)")
     elif c3_pct < 15 and sup3 > 25 and inf3 > 25: patrones.append("⚖️ DOJI / INDECISIÓN")
     elif inf3 > 60 and c3_pct < 25 and sup3 < 15: patrones.append("🔨 MARTILLO / PINBAR ALCISTA")
     elif sup3 > 60 and c3_pct < 25 and inf3 < 15: patrones.append("🌠 ESTRELLA FUGAZ / SHOOTING STAR")
-
     return " | ".join(patrones) if patrones else "Formación de consolidación normal"
 
 def generar_descripcion_nison(df, idx=-2):
@@ -373,7 +336,7 @@ def generar_descripcion_nison(df, idx=-2):
 """
     return descripcion, atr
 
-# =================== IA GROQ: DECISIÓN MATRIZ TOTAL ===================
+# =================== IA GROQ (MODELO 120B) ===================
 def analizar_con_groq_texto(descripcion, atr, reglas_aprendidas):
     try:
         system_msg = f"""
@@ -429,11 +392,13 @@ def analizar_con_groq_texto(descripcion, atr, reglas_aprendidas):
 # =================== AUTOAPRENDIZAJE IA (CORREGIDO) ===================
 def aprender_de_trades():
     global ADAPTIVE_SL_MULT, ADAPTIVE_TP1_MULT, ADAPTIVE_TRAILING_MULT, ULTIMO_APRENDIZAJE, REGLAS_APRENDIDAS
-    if len(TRADE_HISTORY) < 10 or (len(TRADE_HISTORY) - ULTIMO_APRENDIZAJE < 10): return
+    total_trades = len(TRADE_HISTORY)
+    if total_trades < 10 or (total_trades - ULTIMO_APRENDIZAJE) < 10:
+        print(f"⏳ Aprendizaje pospuesto: trades={total_trades}, ultimo_aprendizaje={ULTIMO_APRENDIZAJE}")
+        return
 
     ultimos = TRADE_HISTORY[-10:]
     wins = sum(1 for t in ultimos if t['resultado_win'])
-    losses = 10 - wins
     winrate = wins / 10.0
 
     resumen_trades = ""
@@ -452,7 +417,7 @@ def aprender_de_trades():
       "trailing_mult_sugerido": 1.8
     }
     """
-    user_msg = f"Winrate: {winrate*100:.0f}%. ({wins}W, {losses}L).\n\nHistorial:\n{resumen_trades}\n\nDicta la nueva regla."
+    user_msg = f"Winrate: {winrate*100:.0f}%. ({wins}W, {10-wins}L).\n\nHistorial:\n{resumen_trades}\n\nDicta la nueva regla."
 
     try:
         respuesta = client.chat.completions.create(model=MODELO_TEXTO, messages=[{"role": "system", "content": system_msg}, {"role": "user", "content": user_msg}], temperature=0.3, max_tokens=500)
@@ -470,13 +435,13 @@ def aprender_de_trades():
         ADAPTIVE_TRAILING_MULT = max(1.0, min(3.0, float(datos.get("trailing_mult_sugerido", ADAPTIVE_TRAILING_MULT))))
 
         msg_telegram = f"""🧠 IA AUTOAPRENDIZAJE (10 Trades)
-📊 Winrate: {winrate*100:.1f}% ({wins}W / {losses}L)
+📊 Winrate: {winrate*100:.1f}% ({wins}W / {10-wins}L)
 🧐 Análisis: {analisis}
 📜 NUEVA REGLA: "{REGLAS_APRENDIDAS}"
 ⚙️ Riesgo Ajustado -> SL:{ADAPTIVE_SL_MULT:.2f} TP1:{ADAPTIVE_TP1_MULT:.2f} Trail:{ADAPTIVE_TRAILING_MULT:.2f}"""
         telegram_mensaje(msg_telegram)
         print(f"\n{msg_telegram}\n")
-        ULTIMO_APRENDIZAJE = len(TRADE_HISTORY)
+        ULTIMO_APRENDIZAJE = total_trades
         guardar_memoria()
     except Exception as e:
         print(f"Error Aprendizaje: {e}")
@@ -689,8 +654,8 @@ def paper_revisar_sl_tp(df, sop, res, slo, inter):
 def run_bot():
     global ULTIMA_DECISION, ULTIMO_MOTIVO
     cargar_memoria()
-    print("🤖 BOT V99.32 INICIADO - Multi-Trades y Detección de Barridos (Liquidity Sweeps)")
-    telegram_mensaje("🤖 BOT V99.32 INICIADO - Sistema Multi-Trades Activado.")
+    print("🤖 BOT V99.33 INICIADO - Multi-Trades y Detección de Barridos (Liquidity Sweeps)")
+    telegram_mensaje("🤖 BOT V99.33 INICIADO - Sistema Multi-Trades Activado (Modelo 120B).")
 
     ultima_vela = None
     while True:
