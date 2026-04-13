@@ -12,10 +12,27 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise ValueError("Falta GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
-MODELO_TEXTO = "openai/gpt-oss-120b"   # ← se mantiene tu modelo
+MODELO_TEXTO = "openai/gpt-oss-20b"   # ← CAMBIADO a 20B (más rápido y económico, igual capacidad analítica)
 
 # ====== MEJORAS IA (MEMORIA + JSON ROBUSTO) ======
 MEMORY_FILE = "memoria_bot.json"
+
+def convertir_serializable(obj):
+    """Convierte objetos numpy/bool no serializables a tipos nativos de Python."""
+    if isinstance(obj, (np.integer, np.int64)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64)):
+        return float(obj)
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {k: convertir_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [convertir_serializable(item) for item in obj]
+    else:
+        return obj
 
 def guardar_memoria():
     data = {
@@ -29,11 +46,19 @@ def guardar_memoria():
         "PAPER_LOSS": PAPER_LOSS,
         "PAPER_TRADES_TOTALES": PAPER_TRADES_TOTALES
     }
+    # Convertir cualquier tipo no serializable a nativo de Python
+    data_serializable = convertir_serializable(data)
     try:
         with open(MEMORY_FILE, "w") as f:
-            json.dump(data, f, indent=4)
+            json.dump(data_serializable, f, indent=4)
     except Exception as e:
-        print("Error guardando memoria:", e)
+        print(f"Error guardando memoria: {e}")
+        # Debug: mostrar qué campo causó el error
+        for k, v in data_serializable.items():
+            try:
+                json.dumps({k: v})
+            except Exception as e2:
+                print(f"  Campo problemático: {k} -> {type(v)} - {e2}")
 
 def cargar_memoria():
     global TRADE_HISTORY, REGLAS_APRENDIDAS
@@ -58,7 +83,7 @@ def cargar_memoria():
 
         print("🧠 Memoria cargada")
     except Exception as e:
-        print("Error cargando memoria:", e)
+        print(f"Error cargando memoria: {e}")
 
 def parse_json_seguro(raw):
     """Extrae y limpia un JSON de la respuesta de la IA, manejando saltos de línea y caracteres no escapados."""
@@ -95,14 +120,10 @@ def parse_json_seguro(raw):
         # Escapar saltos de línea dentro de strings (entre comillas dobles)
         def escape_newlines_in_strings(match):
             content = match.group(0)
-            # Reemplazar \n literal (no escapado) por \\n
             content = content.replace('\n', '\\n').replace('\r', '\\r')
             return content
 
-        # Aplicar solo a partes que están dentro de comillas dobles
         json_str = re.sub(r'"(?:[^"\\]|\\.)*"', escape_newlines_in_strings, json_str)
-
-        # Eliminar caracteres de control no deseados (excepto los ya escapados)
         json_str = re.sub(r'[\x00-\x1f\x7f]', '', json_str)
 
         return json.loads(json_str)
@@ -180,18 +201,16 @@ def obtener_velas(limit=150):
         r = requests.get(f"{BASE_URL}/v5/market/kline", params={"category": "linear", "symbol": SYMBOL, "interval": INTERVAL, "limit": limit}, timeout=20)
         data_json = r.json()
         
-        # Verificar si la respuesta es exitosa
         if data_json.get("retCode") != 0:
             error_msg = data_json.get("retMsg", "Error desconocido")
             print(f"❌ Error Bybit API: {error_msg}")
-            return pd.DataFrame()  # DataFrame vacío
+            return pd.DataFrame()
         
         result = data_json.get("result")
         if result is None:
             print("❌ No hay 'result' en la respuesta de Bybit")
             return pd.DataFrame()
         
-        # Bybit v5 devuelve 'list' dentro de 'result'
         if "list" not in result:
             print(f"❌ La clave 'list' no existe. Respuesta: {list(result.keys())}")
             return pd.DataFrame()
@@ -201,7 +220,6 @@ def obtener_velas(limit=150):
             print("❌ Lista de velas vacía")
             return pd.DataFrame()
         
-        # Invertir para orden cronológico (más antigua primero)
         lista_velas = lista_velas[::-1]
         
         df = pd.DataFrame(lista_velas, columns=['time','open','high','low','close','volume','turnover'])
@@ -388,7 +406,7 @@ def analizar_con_groq_texto(descripcion, atr, reglas_aprendidas):
             model=MODELO_TEXTO,
             messages=[{"role": "system", "content": system_msg}, {"role": "user", "content": user_msg}],
             temperature=0.1,
-            max_tokens=600  # Aumentado de 400 para evitar truncamiento
+            max_tokens=600
         )
         raw = respuesta.choices[0].message.content
         if not raw or raw.strip() == "":
