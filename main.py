@@ -1,4 +1,4 @@
-# BOT TRADING V99.33 – GROQ (MULTI-TRADES + BARRIDOS) - MODELO 120B + MEMORIA FIX
+# BOT TRADING V99.34 – GROQ (MULTI-TRADES + BARRIDOS) - MODELO 120B + MEMORIA COMPLETA + AUTOAPRENDIZAJE CADA 10 TRADES
 # ==============================================================================
 import os, time, requests, json, re, numpy as np, pandas as pd
 from scipy.stats import linregress
@@ -12,7 +12,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise ValueError("Falta GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
-MODELO_TEXTO = "openai/gpt-oss-120b"   # ← Modelo que mejor funciona
+MODELO_TEXTO = "openai/gpt-oss-120b"   # ← Mejor para detectar barridos y falsos rompimientos
 
 # ====== MEJORAS IA (MEMORIA + JSON ROBUSTO) ======
 MEMORY_FILE = "memoria_bot.json"
@@ -35,6 +35,7 @@ def convertir_serializable(obj):
         return obj
 
 def guardar_memoria():
+    global ULTIMO_APRENDIZAJE
     data = {
         "TRADE_HISTORY": TRADE_HISTORY,
         "REGLAS_APRENDIDAS": REGLAS_APRENDIDAS,
@@ -44,12 +45,14 @@ def guardar_memoria():
         "PAPER_BALANCE": PAPER_BALANCE,
         "PAPER_WIN": PAPER_WIN,
         "PAPER_LOSS": PAPER_LOSS,
-        "PAPER_TRADES_TOTALES": PAPER_TRADES_TOTALES
+        "PAPER_TRADES_TOTALES": PAPER_TRADES_TOTALES,
+        "ULTIMO_APRENDIZAJE": ULTIMO_APRENDIZAJE
     }
     data_serializable = convertir_serializable(data)
     try:
         with open(MEMORY_FILE, "w") as f:
             json.dump(data_serializable, f, indent=4)
+        print("💾 Memoria guardada correctamente")
     except Exception as e:
         print(f"Error guardando memoria: {e}")
 
@@ -57,8 +60,10 @@ def cargar_memoria():
     global TRADE_HISTORY, REGLAS_APRENDIDAS
     global ADAPTIVE_SL_MULT, ADAPTIVE_TP1_MULT, ADAPTIVE_TRAILING_MULT
     global PAPER_BALANCE, PAPER_WIN, PAPER_LOSS, PAPER_TRADES_TOTALES
+    global ULTIMO_APRENDIZAJE
 
     if not os.path.exists(MEMORY_FILE):
+        print("📁 No existe archivo de memoria. Se empezará desde cero.")
         return
     try:
         with open(MEMORY_FILE, "r") as f:
@@ -73,8 +78,9 @@ def cargar_memoria():
         PAPER_WIN = data.get("PAPER_WIN", 0)
         PAPER_LOSS = data.get("PAPER_LOSS", 0)
         PAPER_TRADES_TOTALES = data.get("PAPER_TRADES_TOTALES", 0)
+        ULTIMO_APRENDIZAJE = data.get("ULTIMO_APRENDIZAJE", 0)
 
-        print("🧠 Memoria cargada")
+        print(f"🧠 Memoria cargada: {PAPER_TRADES_TOTALES} trades cerrados, último aprendizaje en trade #{ULTIMO_APRENDIZAJE}")
     except Exception as e:
         print(f"Error cargando memoria: {e}")
 
@@ -389,14 +395,20 @@ def analizar_con_groq_texto(descripcion, atr, reglas_aprendidas):
         print(f"Error IA: {e}")
         return "Hold", ["Error IA"], "", (DEFAULT_SL_MULT, DEFAULT_TP1_MULT, DEFAULT_TRAILING_MULT)
 
-# =================== AUTOAPRENDIZAJE IA (CORREGIDO) ===================
+# =================== AUTOAPRENDIZAJE IA (CORREGIDO Y CON LOGS) ===================
 def aprender_de_trades():
     global ADAPTIVE_SL_MULT, ADAPTIVE_TP1_MULT, ADAPTIVE_TRAILING_MULT, ULTIMO_APRENDIZAJE, REGLAS_APRENDIDAS
     total_trades = len(TRADE_HISTORY)
-    if total_trades < 10 or (total_trades - ULTIMO_APRENDIZAJE) < 10:
-        print(f"⏳ Aprendizaje pospuesto: trades={total_trades}, ultimo_aprendizaje={ULTIMO_APRENDIZAJE}")
+    
+    # Condición de aprendizaje: al menos 10 trades cerrados y 10 nuevos desde el último aprendizaje
+    if total_trades < 10:
+        print(f"⏳ Aprendizaje no disponible: solo {total_trades} trades cerrados (mínimo 10).")
+        return
+    if (total_trades - ULTIMO_APRENDIZAJE) < 10:
+        print(f"⏳ Aprendizaje pospuesto: han pasado {total_trades - ULTIMO_APRENDIZAJE} trades desde el último aprendizaje (necesarios 10).")
         return
 
+    print(f"🧠 Iniciando autoaprendizaje con los últimos 10 trades...")
     ultimos = TRADE_HISTORY[-10:]
     wins = sum(1 for t in ultimos if t['resultado_win'])
     winrate = wins / 10.0
@@ -420,19 +432,32 @@ def aprender_de_trades():
     user_msg = f"Winrate: {winrate*100:.0f}%. ({wins}W, {10-wins}L).\n\nHistorial:\n{resumen_trades}\n\nDicta la nueva regla."
 
     try:
-        respuesta = client.chat.completions.create(model=MODELO_TEXTO, messages=[{"role": "system", "content": system_msg}, {"role": "user", "content": user_msg}], temperature=0.3, max_tokens=500)
+        respuesta = client.chat.completions.create(
+            model=MODELO_TEXTO,
+            messages=[{"role": "system", "content": system_msg}, {"role": "user", "content": user_msg}],
+            temperature=0.3,
+            max_tokens=500
+        )
         raw = respuesta.choices[0].message.content
         if not raw:
+            print("⚠️ Respuesta vacía del mentor, no se pudo aprender.")
             return
         datos = parse_json_seguro(raw)
         if not datos:
+            print("⚠️ JSON inválido del mentor, no se pudo aprender.")
             return
 
         analisis = datos.get("analisis", "Análisis completado.")
-        REGLAS_APRENDIDAS = datos.get("nueva_regla", REGLAS_APRENDIDAS)
-        ADAPTIVE_SL_MULT = max(0.5, min(2.5, float(datos.get("sl_mult_sugerido", ADAPTIVE_SL_MULT))))
-        ADAPTIVE_TP1_MULT = max(0.8, min(3.0, float(datos.get("tp1_mult_sugerido", ADAPTIVE_TP1_MULT))))
-        ADAPTIVE_TRAILING_MULT = max(1.0, min(3.0, float(datos.get("trailing_mult_sugerido", ADAPTIVE_TRAILING_MULT))))
+        nueva_regla = datos.get("nueva_regla", REGLAS_APRENDIDAS)
+        nuevo_sl = max(0.5, min(2.5, float(datos.get("sl_mult_sugerido", ADAPTIVE_SL_MULT))))
+        nuevo_tp = max(0.8, min(3.0, float(datos.get("tp1_mult_sugerido", ADAPTIVE_TP1_MULT))))
+        nuevo_trail = max(1.0, min(3.0, float(datos.get("trailing_mult_sugerido", ADAPTIVE_TRAILING_MULT))))
+
+        # Aplicar cambios
+        REGLAS_APRENDIDAS = nueva_regla
+        ADAPTIVE_SL_MULT = nuevo_sl
+        ADAPTIVE_TP1_MULT = nuevo_tp
+        ADAPTIVE_TRAILING_MULT = nuevo_trail
 
         msg_telegram = f"""🧠 IA AUTOAPRENDIZAJE (10 Trades)
 📊 Winrate: {winrate*100:.1f}% ({wins}W / {10-wins}L)
@@ -441,10 +466,16 @@ def aprender_de_trades():
 ⚙️ Riesgo Ajustado -> SL:{ADAPTIVE_SL_MULT:.2f} TP1:{ADAPTIVE_TP1_MULT:.2f} Trail:{ADAPTIVE_TRAILING_MULT:.2f}"""
         telegram_mensaje(msg_telegram)
         print(f"\n{msg_telegram}\n")
+        
+        # Actualizar y guardar
         ULTIMO_APRENDIZAJE = total_trades
         guardar_memoria()
+        print(f"✅ Aprendizaje completado y guardado. Próximo aprendizaje en {ULTIMO_APRENDIZAJE + 10} trades.")
+        
     except Exception as e:
-        print(f"Error Aprendizaje: {e}")
+        print(f"❌ Error en el aprendizaje: {e}")
+        import traceback
+        traceback.print_exc()
 
 # =================== GRÁFICOS MULTI-TRADE ===================
 def generar_grafico(df, trade_info, soporte, resistencia, slope, intercept, tipo="Entrada"):
@@ -647,6 +678,7 @@ def paper_revisar_sl_tp(df, sop, res, slo, inter):
     for t_id in trades_a_cerrar:
         del PAPER_ACTIVE_TRADES[t_id]
 
+    # Ejecutar aprendizaje cada vez que se cierren trades y el total sea múltiplo de 10
     if trades_a_cerrar and PAPER_TRADES_TOTALES > 0 and PAPER_TRADES_TOTALES % 10 == 0:
         aprender_de_trades()
 
@@ -654,8 +686,8 @@ def paper_revisar_sl_tp(df, sop, res, slo, inter):
 def run_bot():
     global ULTIMA_DECISION, ULTIMO_MOTIVO
     cargar_memoria()
-    print("🤖 BOT V99.33 INICIADO - Multi-Trades y Detección de Barridos (Liquidity Sweeps)")
-    telegram_mensaje("🤖 BOT V99.33 INICIADO - Sistema Multi-Trades Activado (Modelo 120B).")
+    print("🤖 BOT V99.34 INICIADO - Multi-Trades y Detección de Barridos (Liquidity Sweeps)")
+    telegram_mensaje("🤖 BOT V99.34 INICIADO - Sistema Multi-Trades Activado (Modelo 120B).")
 
     ultima_vela = None
     while True:
