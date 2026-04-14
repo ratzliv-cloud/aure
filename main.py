@@ -1,4 +1,4 @@
-# BOT TRADING V99.35 – GROQ (MULTI-TRADES + BARRIDOS) - MODELO 20B OPTIMIZADO + MEMORIA COMPLETA
+# BOT TRADING V99.36 – GROQ (MULTI-TRADES + BARRIDOS) - MODELO 20B CON RAZONAMIENTO AVANZADO
 # ==============================================================================
 import os, time, requests, json, re, numpy as np, pandas as pd
 from scipy.stats import linregress
@@ -7,12 +7,13 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from groq import Groq
+import json_repair  # Para reparar respuestas JSON mal formadas al instante
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise ValueError("Falta GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
-MODELO_TEXTO = "openai/gpt-oss-20b"   # ← NUEVO MODELO 20B (más rápido, económico y con excelente rendimiento financiero)
+MODELO_TEXTO = "openai/gpt-oss-20b"
 
 # ====== MEJORAS IA (MEMORIA + JSON ROBUSTO) ======
 MEMORY_FILE = "memoria_bot.json"
@@ -85,43 +86,35 @@ def cargar_memoria():
         print(f"Error cargando memoria: {e}")
 
 def parse_json_seguro(raw):
-    """Extrae y limpia un JSON de la respuesta de la IA."""
+    """Extrae y limpia un JSON de la respuesta de la IA usando json_repair como respaldo."""
     if not raw or raw.strip() == "":
-        print("⚠️ Respuesta vacía de IA")
         return None
     try:
-        stack = []
-        start = raw.find('{')
-        if start == -1:
-            print("⚠️ No se encontró '{'")
-            return None
-        end = start
-        for i, ch in enumerate(raw[start:], start):
-            if ch == '{':
-                stack.append(ch)
-            elif ch == '}':
-                if stack:
-                    stack.pop()
-                    if not stack:
-                        end = i
-                        break
-        if not stack and end > start:
-            json_str = raw[start:end+1]
-        else:
-            match = re.search(r'\{.*\}', raw, re.DOTALL)
-            if not match:
-                return None
-            json_str = match.group(0)
-
-        def escape_newlines_in_strings(match):
-            content = match.group(0)
-            return content.replace('\n', '\\n').replace('\r', '\\r')
-
-        json_str = re.sub(r'"(?:[^"\\]|\\.)*"', escape_newlines_in_strings, json_str)
-        json_str = re.sub(r'[\x00-\x1f\x7f]', '', json_str)
-        return json.loads(json_str)
+        # Intentar reparar directamente con json_repair
+        repaired = json_repair.repair_json(raw)
+        return json.loads(repaired)
     except Exception as e:
-        print(f"⚠️ Error parseando JSON: {e}")
+        # Fallback manual: buscar primer '{' y último '}' balanceado
+        try:
+            stack = []
+            start = raw.find('{')
+            if start == -1:
+                return None
+            end = start
+            for i, ch in enumerate(raw[start:], start):
+                if ch == '{':
+                    stack.append(ch)
+                elif ch == '}':
+                    if stack:
+                        stack.pop()
+                        if not stack:
+                            end = i
+                            break
+            if not stack and end > start:
+                json_str = raw[start:end+1]
+                return json.loads(json_str)
+        except:
+            pass
         return None
 
 # =================== CONFIGURACIÓN ===================
@@ -280,25 +273,38 @@ def generar_descripcion_nison(df, idx=-2):
     anat_v2 = analizar_anatomia_vela(df.iloc[idx-1]) if idx-1 >= 0 else "N/A"
     anat_v3 = analizar_anatomia_vela(df.iloc[idx]) if idx >= 0 else "N/A"
 
+    # Nuevo: calcular cruces de EMA20 en últimas 10 velas (para detectar rango)
+    ultimas_10 = df.iloc[idx-9:idx+1] if idx >= 9 else df.iloc[:idx+1]
+    if len(ultimas_10) >= 5:
+        sobre_ema = (ultimas_10['close'] > ultimas_10['ema20']).sum()
+        pct_sobre = (sobre_ema / len(ultimas_10)) * 100
+        lateralidad = f"{pct_sobre:.0f}% de velas sobre EMA20. "
+        if 40 <= pct_sobre <= 60:
+            lateralidad += "MERCADO EN RANGO (evitar entradas solo por tocar EMA)."
+        elif pct_sobre > 70:
+            lateralidad += "Tendencia ALCISTA dominante."
+        elif pct_sobre < 30:
+            lateralidad += "Tendencia BAJISTA dominante."
+        else:
+            lateralidad += "Ligera inclinación."
+    else:
+        lateralidad = "Datos insuficientes para evaluar rango."
+
     margen_fakeout = atr * 0.4
     if precio > ema20:
         if vela_actual['low'] < (ema20 - margen_fakeout):
-            rol_ema = "🔥 BARRIDO DE LIQUIDEZ EN EMA20: La mecha perforó profundo hacia abajo atrapando vendedores (cazando stops), pero cerró por encima. Fuerte rechazo alcista."
+            rol_ema = "🔥 BARRIDO DE LIQUIDEZ EN EMA20: La mecha perforó profundo hacia abajo atrapando vendedores, pero cerró por encima. Fuerte rechazo alcista."
         elif vela_actual['low'] <= ema20:
             rol_ema = "✅ EMA20 actuando como SOPORTE DINÁMICO normal."
         else:
             rol_ema = "Cabalgando SOBRE la EMA20 (Fuerza Compradora Dominante)."
     else:
         if vela_actual['high'] > (ema20 + margen_fakeout):
-            rol_ema = "🔥 BARRIDO DE LIQUIDEZ EN EMA20: La mecha perforó profundo hacia arriba atrapando compradores (cazando stops), pero cerró por debajo. Fuerte rechazo bajista."
+            rol_ema = "🔥 BARRIDO DE LIQUIDEZ EN EMA20: La mecha perforó profundo hacia arriba atrapando compradores, pero cerró por debajo. Fuerte rechazo bajista."
         elif vela_actual['high'] >= ema20:
             rol_ema = "❌ EMA20 actuando como RESISTENCIA DINÁMICA normal."
         else:
             rol_ema = "Presionado BAJO la EMA20 (Fuerza Vendedora Dominante)."
-
-    df_reciente = df.iloc[idx-20:] if idx == -1 else df.iloc[idx-20:idx+1]
-    toques_res = (df_reciente['high'] >= resistencia * 0.998).sum()
-    toques_sop = (df_reciente['low'] <= soporte * 1.002).sum()
 
     polaridad = f"Precio actual: {precio:.2f}. "
     if vela_actual['low'] < soporte and precio > soporte:
@@ -327,7 +333,7 @@ def generar_descripcion_nison(df, idx=-2):
 
 2. EMA 20 Y BARRIDOS
 - Acción sobre EMA: {rol_ema}
-(NOTA: Un nivel perforado que devuelve el precio rápidamente es una barrida de liquidez, señal de muy alta confirmación en dirección contraria a la mecha).
+- Lateralidad: {lateralidad}
 
 3. CLÚSTERES Y PRESIÓN ACUMULADA
 - Presión oculta (8 velas): {cluster_txt}
@@ -342,33 +348,41 @@ def generar_descripcion_nison(df, idx=-2):
 """
     return descripcion, atr
 
-# =================== IA GROQ (MODELO 20B OPTIMIZADO) ===================
+# =================== IA GROQ (MODELO 20B CON RAZONAMIENTO AVANZADO) ===================
 def analizar_con_groq_texto(descripcion, atr, reglas_aprendidas):
     try:
-        # Prompt de sistema mejorado para el 20B (más conciso pero manteniendo toda la lógica)
         system_msg = f"""
-        Eres un experto en Price Action. Analiza la matriz de confluencia y trampas de liquidez.
-        - Los soportes, resistencias y EMAs no son líneas exactas; los barridos de liquidez (mecha que perfora y cierra fuera) son señales fuertes en dirección contraria.
-        - Regla evolutiva: "{reglas_aprendidas}"
-        - Puedes operar reversiones, continuaciones o falsos rompimientos si el contexto lo apoya.
-        - La vela actual es clave: si el contexto es alcista pero la vela actual es una estrella fugaz (bajista), anula y es "Hold".
-        Responde SOLO con un JSON en una línea, sin saltos de línea dentro de las cadenas:
-        {{"decision":"Buy/Sell/Hold","patron":"nombre del patrón","razones":["razón1","razón2"],"sl_mult":1.2,"tp1_mult":1.5,"trailing_mult":1.8}}
-        """
+Eres un Maestro del Price Action con experiencia en detectar trampas de liquidez y falsos rompimientos.
+
+REGLAS OBLIGATORIAS:
+1. NO operar solo porque el precio toca la EMA20. Exige confirmación adicional: barrido de liquidez, patrón de velas relevante (martillo, estrella fugaz, envolvente), o cluster de mechas.
+2. Si el mercado está en RANGO (lateralidad entre 40% y 60% de velas sobre EMA20), NO entres en ninguna dirección a menos que haya un barrido claro de liquidez en soporte/resistencia.
+3. Los falsos rompimientos se detectan cuando el precio perfora un nivel (soporte/resistencia/EMA) con una mecha larga (>0.4*ATR) y cierra del otro lado. En ese caso, la señal es en DIRECCIÓN CONTRARIA a la mecha.
+4. Utiliza el ATR para evaluar la magnitud de las mechas. Un margen de fakeout es ATR*0.4.
+5. Siempre considera el contexto global: tendencia macro, micro, clusters de mechas, y patrones de velas.
+
+Regla evolutiva actual: "{reglas_aprendidas}"
+
+Responde ÚNICAMENTE con un JSON en una sola línea. Ejemplo:
+{{"decision":"Buy","patron":"Barrido en soporte + martillo","razones":["Mecha larga inferior que barrió liquidez","Cierre por encima de EMA20"],"sl_mult":1.2,"tp1_mult":1.5,"trailing_mult":1.8}}
+"""
         user_msg = f"{descripcion}\nATR: {atr:.2f}"
 
         respuesta = client.chat.completions.create(
             model=MODELO_TEXTO,
             messages=[{"role": "system", "content": system_msg}, {"role": "user", "content": user_msg}],
-            temperature=0.1,
-            max_tokens=500  # Reducido ligeramente para el 20B (suficiente)
+            temperature=0.0,
+            max_tokens=500
         )
         raw = respuesta.choices[0].message.content
+
         if not raw or raw.strip() == "":
-            return "Hold", ["Respuesta vacía de IA"], "", (DEFAULT_SL_MULT, DEFAULT_TP1_MULT, DEFAULT_TRAILING_MULT)
+            print("⚠️ Respuesta vacía de IA -> Hold")
+            return "Hold", ["Respuesta vacía"], "", (DEFAULT_SL_MULT, DEFAULT_TP1_MULT, DEFAULT_TRAILING_MULT)
 
         datos = parse_json_seguro(raw)
         if not datos:
+            print("⚠️ JSON inválido -> Hold")
             return "Hold", ["JSON inválido"], "", (DEFAULT_SL_MULT, DEFAULT_TP1_MULT, DEFAULT_TRAILING_MULT)
 
         decision = datos.get("decision", "Hold")
@@ -377,114 +391,82 @@ def analizar_con_groq_texto(descripcion, atr, reglas_aprendidas):
         tr_m = max(1.0, min(3.0, float(datos.get("trailing_mult", 1.8))))
 
         return decision, datos.get("razones", []), datos.get("patron", ""), (sl_m, tp_m, tr_m)
-    except Exception as e:
-        print(f"Error IA: {e}")
-        return "Hold", ["Error IA"], "", (DEFAULT_SL_MULT, DEFAULT_TP1_MULT, DEFAULT_TRAILING_MULT)
 
-# =================== AUTOAPRENDIZAJE IA (CORREGIDO Y CON LOGS) ===================
+    except Exception as e:
+        print(f"⚠️ Error IA: {e} -> Hold")
+        return "Hold", [f"Error: {e}"], "", (DEFAULT_SL_MULT, DEFAULT_TP1_MULT, DEFAULT_TRAILING_MULT)
+
+# =================== AUTOAPRENDIZAJE (cada 10 trades) ===================
 def aprender_de_trades():
     global ADAPTIVE_SL_MULT, ADAPTIVE_TP1_MULT, ADAPTIVE_TRAILING_MULT, ULTIMO_APRENDIZAJE, REGLAS_APRENDIDAS
     total_trades = len(TRADE_HISTORY)
-    
-    if total_trades < 10:
-        print(f"⏳ Aprendizaje no disponible: solo {total_trades} trades cerrados (mínimo 10).")
-        return
-    if (total_trades - ULTIMO_APRENDIZAJE) < 10:
-        print(f"⏳ Aprendizaje pospuesto: han pasado {total_trades - ULTIMO_APRENDIZAJE} trades desde el último aprendizaje (necesarios 10).")
+    if total_trades < 10 or (total_trades - ULTIMO_APRENDIZAJE) < 10:
         return
 
-    print(f"🧠 Iniciando autoaprendizaje con los últimos 10 trades...")
+    print("🧠 Iniciando autoaprendizaje...")
     ultimos = TRADE_HISTORY[-10:]
     wins = sum(1 for t in ultimos if t['resultado_win'])
     winrate = wins / 10.0
-
-    resumen_trades = ""
+    resumen = ""
     for i, t in enumerate(ultimos):
         estado = "WIN ✅" if t['resultado_win'] else "LOSS ❌"
-        resumen_trades += f"Trade {i+1} ({estado}): {t['decision'].upper()} | {t.get('patron', 'Desconocido')} | PnL: {t['pnl']:.2f}\n"
+        resumen += f"Trade{i+1} ({estado}): {t['decision']} | {t.get('patron','?')} | PnL:{t['pnl']:.2f}\n"
 
     system_msg = """
-    Eres el Mentor de Trading de una IA. Analiza los últimos 10 trades.
-    Responde ÚNICAMENTE con un JSON en una línea:
-    {"analisis":"explicación","nueva_regla":"instrucción de mejora","sl_mult_sugerido":1.5,"tp1_mult_sugerido":1.5,"trailing_mult_sugerido":1.8}
-    """
-    user_msg = f"Winrate: {winrate*100:.0f}%. ({wins}W, {10-wins}L).\n\nHistorial:\n{resumen_trades}\n\nDicta la nueva regla."
-
+Eres el mentor de trading. Analiza los últimos 10 trades y sugiere mejoras. Responde SOLO con JSON en una línea:
+{"analisis":"explicación","nueva_regla":"instrucción","sl_mult_sugerido":1.5,"tp1_mult_sugerido":1.5,"trailing_mult_sugerido":1.8}
+"""
+    user_msg = f"Winrate: {winrate*100:.0f}% ({wins}W/{10-wins}L)\n{resumen}\nNueva regla:"
     try:
-        respuesta = client.chat.completions.create(
+        resp = client.chat.completions.create(
             model=MODELO_TEXTO,
-            messages=[{"role": "system", "content": system_msg}, {"role": "user", "content": user_msg}],
+            messages=[{"role":"system","content":system_msg},{"role":"user","content":user_msg}],
             temperature=0.3,
             max_tokens=400
         )
-        raw = respuesta.choices[0].message.content
-        if not raw:
-            print("⚠️ Respuesta vacía del mentor, no se pudo aprender.")
-            return
+        raw = resp.choices[0].message.content
         datos = parse_json_seguro(raw)
-        if not datos:
-            print("⚠️ JSON inválido del mentor, no se pudo aprender.")
-            return
-
-        analisis = datos.get("analisis", "Análisis completado.")
-        nueva_regla = datos.get("nueva_regla", REGLAS_APRENDIDAS)
-        nuevo_sl = max(0.5, min(2.5, float(datos.get("sl_mult_sugerido", ADAPTIVE_SL_MULT))))
-        nuevo_tp = max(0.8, min(3.0, float(datos.get("tp1_mult_sugerido", ADAPTIVE_TP1_MULT))))
-        nuevo_trail = max(1.0, min(3.0, float(datos.get("trailing_mult_sugerido", ADAPTIVE_TRAILING_MULT))))
-
-        REGLAS_APRENDIDAS = nueva_regla
-        ADAPTIVE_SL_MULT = nuevo_sl
-        ADAPTIVE_TP1_MULT = nuevo_tp
-        ADAPTIVE_TRAILING_MULT = nuevo_trail
-
-        msg_telegram = f"""🧠 IA AUTOAPRENDIZAJE (10 Trades)
-📊 Winrate: {winrate*100:.1f}% ({wins}W / {10-wins}L)
-🧐 Análisis: {analisis}
-📜 NUEVA REGLA: "{REGLAS_APRENDIDAS}"
-⚙️ Riesgo Ajustado -> SL:{ADAPTIVE_SL_MULT:.2f} TP1:{ADAPTIVE_TP1_MULT:.2f} Trail:{ADAPTIVE_TRAILING_MULT:.2f}"""
-        telegram_mensaje(msg_telegram)
-        print(f"\n{msg_telegram}\n")
-        
+        if datos:
+            REGLAS_APRENDIDAS = datos.get("nueva_regla", REGLAS_APRENDIDAS)
+            ADAPTIVE_SL_MULT = max(0.5, min(2.5, float(datos.get("sl_mult_sugerido", ADAPTIVE_SL_MULT))))
+            ADAPTIVE_TP1_MULT = max(0.8, min(3.0, float(datos.get("tp1_mult_sugerido", ADAPTIVE_TP1_MULT))))
+            ADAPTIVE_TRAILING_MULT = max(1.0, min(3.0, float(datos.get("trailing_mult_sugerido", ADAPTIVE_TRAILING_MULT))))
+            msg = f"🧠 APRENDIZAJE (10 trades)\nWinrate {winrate*100:.1f}%\nNueva regla: {REGLAS_APRENDIDAS}\nSL:{ADAPTIVE_SL_MULT:.2f} TP:{ADAPTIVE_TP1_MULT:.2f} Trail:{ADAPTIVE_TRAILING_MULT:.2f}"
+            telegram_mensaje(msg)
+            print(msg)
         ULTIMO_APRENDIZAJE = total_trades
         guardar_memoria()
-        print(f"✅ Aprendizaje completado y guardado. Próximo aprendizaje en {ULTIMO_APRENDIZAJE + 10} trades.")
-        
     except Exception as e:
-        print(f"❌ Error en el aprendizaje: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error aprendizaje: {e}")
 
-# =================== GRÁFICOS MULTI-TRADE ===================
+# =================== GRÁFICOS (sin cambios) ===================
 def generar_grafico(df, trade_info, soporte, resistencia, slope, intercept, tipo="Entrada"):
     if df.empty:
         return None
     df_plot = df.tail(GRAFICO_VELAS_LIMIT).copy()
     x = np.arange(len(df_plot))
     fig, ax = plt.subplots(figsize=(16,8))
-
     for i in range(len(df_plot)):
         o, h, l, c = df_plot['open'].iloc[i], df_plot['high'].iloc[i], df_plot['low'].iloc[i], df_plot['close'].iloc[i]
         color = '#00ff00' if c >= o else '#ff0000'
         ax.vlines(x[i], l, h, color=color, linewidth=1.5)
         ax.add_patch(plt.Rectangle((x[i]-0.35, min(o,c)), 0.7, max(abs(c-o), 0.1), color=color, alpha=0.9))
-
     ax.axhline(soporte, color='cyan', ls='--', lw=2, label='Soporte')
     ax.axhline(resistencia, color='magenta', ls='--', lw=2, label='Resistencia')
-    ax.plot(x, intercept + slope * x, color='white', linestyle='-.', linewidth=1.5, alpha=0.6, label='Tendencia Inclinada')
-    if 'ema20' in df_plot.columns: ax.plot(x, df_plot['ema20'], 'yellow', lw=2, label='EMA 20')
-
+    ax.plot(x, intercept + slope * x, color='white', linestyle='-.', lw=1.5, alpha=0.6, label='Tendencia')
+    if 'ema20' in df_plot.columns:
+        ax.plot(x, df_plot['ema20'], 'yellow', lw=2, label='EMA 20')
     if tipo == "Entrada":
         decision = trade_info['decision']
         p_act = df_plot['close'].iloc[-2]
         ax.scatter(len(df_plot)-2, p_act + (-30 if decision=='Buy' else 30), s=400, marker='^' if decision=='Buy' else 'v', c='lime' if decision=='Buy' else 'red', zorder=5)
-        txt = f"[TRADE #{trade_info['id']}] {decision.upper()}\nMatriz Global: {trade_info['patron']}\nSL: {trade_info['sl_inicial']:.2f} | TP1: {trade_info['tp1']:.2f} | Trail: {trade_info['trailing_mult']}x"
+        txt = f"[TRADE #{trade_info['id']}] {decision.upper()}\n{trade_info['patron']}\nSL:{trade_info['sl_inicial']:.2f} TP1:{trade_info['tp1']:.2f}"
     else:
         win = trade_info['resultado_win']
-        ax.axhline(trade_info['entrada'], color='blue', ls=':', lw=2, label='Precio de Entrada')
-        ax.axhline(trade_info['sl_actual'], color='white', ls=':', lw=2, label='Precio de Salida')
+        ax.axhline(trade_info['entrada'], color='blue', ls=':', lw=2, label='Entrada')
+        ax.axhline(trade_info['sl_actual'], color='white', ls=':', lw=2, label='Salida')
         estado = "WIN" if win else "LOSS"
-        txt = f"[TRADE #{trade_info['id']}] {estado} | PnL: {trade_info['pnl']:.2f} USD\nDirección: {trade_info['decision']}"
-
+        txt = f"[TRADE #{trade_info['id']}] {estado} | PnL: {trade_info['pnl']:.2f} USD"
     ax.text(0.01, 0.99, txt, transform=ax.transAxes, fontsize=11, verticalalignment='top', bbox=dict(boxstyle='round', facecolor='black', alpha=0.8), color='white')
     ax.set_facecolor('#121212')
     fig.patch.set_facecolor('#121212')
@@ -497,7 +479,7 @@ def generar_grafico(df, trade_info, soporte, resistencia, slope, intercept, tipo
     plt.close()
     return ruta
 
-# =================== GESTIÓN MULTI-TRADE ===================
+# =================== GESTIÓN MULTI-TRADE (sin cambios relevantes) ===================
 def risk_management_check():
     global PAPER_DAILY_START_BALANCE, PAPER_STOPPED_TODAY, PAPER_CURRENT_DAY
     hoy = datetime.now(timezone.utc).date()
@@ -505,7 +487,6 @@ def risk_management_check():
         PAPER_CURRENT_DAY = hoy
         PAPER_DAILY_START_BALANCE = PAPER_BALANCE
         PAPER_STOPPED_TODAY = False
-
     drawdown = (PAPER_BALANCE - PAPER_DAILY_START_BALANCE) / PAPER_DAILY_START_BALANCE
     if drawdown <= -MAX_DAILY_DRAWDOWN_PCT and not PAPER_STOPPED_TODAY:
         telegram_mensaje("🛑 Drawdown diario máximo. Bot pausado por hoy.")
@@ -516,79 +497,49 @@ def paper_abrir_posicion(decision, precio, atr, razones, patron, multis_ia, df, 
     global PAPER_BALANCE, TRADE_COUNTER
     if len(PAPER_ACTIVE_TRADES) >= MAX_CONCURRENT_TRADES:
         return False
-
     for t in PAPER_ACTIVE_TRADES.values():
         if t['decision'] == decision and abs(t['entrada'] - precio) < atr * 0.2:
             return False
-
     sl_m = (multis_ia[0] * 0.6) + (ADAPTIVE_SL_MULT * 0.4)
     tp_m = (multis_ia[1] * 0.6) + (ADAPTIVE_TP1_MULT * 0.4)
     tr_m = (multis_ia[2] * 0.6) + (ADAPTIVE_TRAILING_MULT * 0.4)
-
     sl_inicial = precio - (atr * sl_m) if decision == "Buy" else precio + (atr * sl_m)
     tp1 = precio + (atr * tp_m) if decision == "Buy" else precio - (atr * tp_m)
     distancia = abs(precio - sl_inicial)
     if distancia == 0: return False
-
     TRADE_COUNTER += 1
     riesgo_usd = PAPER_BALANCE * RISK_PER_TRADE
     size_btc = min((riesgo_usd / distancia) * precio, PAPER_BALANCE * LEVERAGE) / precio
-
     trade = {
-        "id": TRADE_COUNTER,
-        "decision": decision,
-        "entrada": precio,
-        "sl_inicial": sl_inicial,
-        "tp1": tp1,
-        "trailing_mult": tr_m,
-        "size_btc": size_btc,
-        "size_restante": size_btc,
-        "tp1_ejecutado": False,
-        "pnl_parcial": 0.0,
-        "sl_actual": sl_inicial,
-        "max_precio": precio,
-        "patron": patron,
-        "atr_entrada": atr
+        "id": TRADE_COUNTER, "decision": decision, "entrada": precio,
+        "sl_inicial": sl_inicial, "tp1": tp1, "trailing_mult": tr_m,
+        "size_btc": size_btc, "size_restante": size_btc, "tp1_ejecutado": False,
+        "pnl_parcial": 0.0, "sl_actual": sl_inicial, "max_precio": precio,
+        "patron": patron, "atr_entrada": atr
     }
-
     PAPER_ACTIVE_TRADES[TRADE_COUNTER] = trade
-
-    msg = f"""📌 [TRADE #{TRADE_COUNTER}] ABIERTO: {decision.upper()}
-Entrada: {precio:.2f}
-🎯 TP1 (50%): {tp1:.2f}
-🛑 Stop Loss: {sl_inicial:.2f}
-🔄 Trailing: {tr_m:.2f}x ATR
-🔍 Matriz: {patron}"""
-    print(f"🚀 [TRADE #{TRADE_COUNTER}] {decision} a {precio:.2f}")
+    msg = f"📌 [TRADE #{TRADE_COUNTER}] {decision.upper()} a {precio:.2f}\nSL:{sl_inicial:.2f} TP1:{tp1:.2f}\n{patron}"
+    print(msg)
     telegram_mensaje(msg)
-
     ruta_img = generar_grafico(df, trade, sop, res, slo, inter, "Entrada")
     if ruta_img:
-        telegram_enviar_imagen(ruta_img, f"🚀 [TRADE #{TRADE_COUNTER}] {decision.upper()}\n{razones[0] if razones else ''}")
+        telegram_enviar_imagen(ruta_img, msg)
     return True
 
 def paper_revisar_sl_tp(df, sop, res, slo, inter):
     global PAPER_BALANCE, PAPER_WIN, PAPER_LOSS, PAPER_TRADES_TOTALES, TRADE_HISTORY
-
     if df.empty:
         return
-
     h = df['high'].iloc[-1]
     l = df['low'].iloc[-1]
-    c = df['close'].iloc[-1]
-    atr = df['atr'].iloc[-1]
-
     trades_a_cerrar = []
-
     for t_id, t in PAPER_ACTIVE_TRADES.items():
         cerrar = False
         motivo = ""
-
         if t['decision'] == "Buy":
             t['max_precio'] = max(t['max_precio'], h)
         else:
             t['max_precio'] = min(t['max_precio'], l)
-
         if not t['tp1_ejecutado']:
             if (t['decision'] == "Buy" and h >= t['tp1']) or (t['decision'] == "Sell" and l <= t['tp1']):
                 beneficio = abs(t['tp1'] - t['entrada']) * (t['size_btc'] * PORCENTAJE_CIERRE_TP1)
@@ -597,20 +548,11 @@ def paper_revisar_sl_tp(df, sop, res, slo, inter):
                 t['size_restante'] *= (1 - PORCENTAJE_CIERRE_TP1)
                 t['tp1_ejecutado'] = True
                 t['sl_actual'] = t['entrada']
-
-                msg_tp1 = f"🎯 [TRADE #{t_id}] ¡TP1 ALCANZADO!\nSe cerró el 50% asegurando +{beneficio:.2f} USD.\n🛡️ SL movido a Break-Even ({t['entrada']:.2f})"
-                telegram_mensaje(msg_tp1)
-                print(msg_tp1)
-
+                telegram_mensaje(f"🎯 TP1 #{t_id}: +{beneficio:.2f} USD, SL a BE")
         if t['tp1_ejecutado']:
             n_sl = t['max_precio'] - (t['atr_entrada'] * t['trailing_mult']) if t['decision'] == "Buy" else t['max_precio'] + (t['atr_entrada'] * t['trailing_mult'])
-
             if (t['decision'] == "Buy" and n_sl > t['sl_actual']) or (t['decision'] == "Sell" and n_sl < t['sl_actual']):
                 t['sl_actual'] = n_sl
-                msg_trail = f"🔄 [TRADE #{t_id}] Trailing Stop ajustado a: {n_sl:.2f}"
-                telegram_mensaje(msg_trail)
-                print(msg_trail)
-
             if (t['decision'] == "Buy" and l <= t['sl_actual']) or (t['decision'] == "Sell" and h >= t['sl_actual']):
                 cerrar = True
                 motivo = "Trailing Stop"
@@ -619,7 +561,6 @@ def paper_revisar_sl_tp(df, sop, res, slo, inter):
                 cerrar = True
                 motivo = "Stop Loss Inicial"
                 t['sl_actual'] = t['sl_inicial']
-
         if cerrar:
             pnl_rest = (t['sl_actual'] - t['entrada']) * t['size_restante'] if t['decision'] == "Buy" else (t['entrada'] - t['sl_actual']) * t['size_restante']
             pnl_total = t['pnl_parcial'] + pnl_rest
@@ -630,91 +571,72 @@ def paper_revisar_sl_tp(df, sop, res, slo, inter):
                 PAPER_WIN += 1
             else:
                 PAPER_LOSS += 1
-
             t['pnl'] = pnl_total
             t['resultado_win'] = win
             trades_a_cerrar.append(t_id)
-
             TRADE_HISTORY.append({
                 "fecha": datetime.now(timezone.utc).isoformat(),
-                "decision": t['decision'],
-                "patron": t['patron'],
-                "pnl": pnl_total,
-                "resultado_win": win
+                "decision": t['decision'], "patron": t['patron'],
+                "pnl": pnl_total, "resultado_win": win
             })
             guardar_memoria()
-
-            msg_cierre = f"📤 [TRADE #{t_id}] CERRADO ({motivo})\nDirección: {t['decision'].upper()}\nSalida: {t['sl_actual']:.2f}\n💰 PnL Total: {pnl_total:.2f} USD\n🏦 Balance: {PAPER_BALANCE:.2f} USD"
-            telegram_mensaje(msg_cierre)
-            print(msg_cierre)
-
+            msg = f"📤 [{motivo}] Trade #{t_id} {t['decision'].upper()} -> {t['sl_actual']:.2f} | PnL: {pnl_total:.2f} USD"
+            telegram_mensaje(msg)
             ruta_img = generar_grafico(df, t, sop, res, slo, inter, "Salida")
             if ruta_img:
-                telegram_enviar_imagen(ruta_img, msg_cierre)
-
+                telegram_enviar_imagen(ruta_img, msg)
     for t_id in trades_a_cerrar:
         del PAPER_ACTIVE_TRADES[t_id]
-
-    if trades_a_cerrar and PAPER_TRADES_TOTALES > 0 and PAPER_TRADES_TOTALES % 10 == 0:
+    if trades_a_cerrar and PAPER_TRADES_TOTALES % 10 == 0:
         aprender_de_trades()
 
 # =================== LOOP PRINCIPAL ===================
 def run_bot():
     global ULTIMA_DECISION, ULTIMO_MOTIVO
     cargar_memoria()
-    print("🤖 BOT V99.35 INICIADO - Multi-Trades y Detección de Barridos (Modelo 20B Optimizado)")
-    telegram_mensaje("🤖 BOT V99.35 INICIADO - Sistema Multi-Trades Activado (Modelo 20B).")
-
+    print("🤖 BOT V99.36 INICIADO - Modelo 20B con razonamiento avanzado (anti-rango)")
+    telegram_mensaje("🤖 BOT V99.36 INICIADO - 20B optimizado para detectar barridos y evitar falsas señales EMA.")
     ultima_vela = None
     while True:
         try:
             df_raw = obtener_velas()
             if df_raw.empty:
-                print("⚠️ No se pudieron obtener velas. Reintentando en 60s...")
                 time.sleep(60)
                 continue
-
             df = calcular_indicadores(df_raw)
             if df.empty:
-                print("⚠️ DataFrame vacío tras calcular indicadores.")
                 time.sleep(60)
                 continue
-
             vela_cerrada = df.index[-2]
             precio = df['close'].iloc[-1]
             atr = df['atr'].iloc[-1]
             sop, res, slo, inter, tend, micro = detectar_zonas_mercado(df)
-
             pnl_global = PAPER_BALANCE - PAPER_BALANCE_INICIAL
-            winrate = (PAPER_WIN / PAPER_TRADES_TOTALES) * 100 if PAPER_TRADES_TOTALES > 0 else 0
-            activos_count = len(PAPER_ACTIVE_TRADES)
-
-            print(f"\n💓 Heartbeat | P: {precio:.2f} | ATR: {atr:.2f} | Trades Activos: {activos_count}/{MAX_CONCURRENT_TRADES} | Cerrados: {PAPER_TRADES_TOTALES} | PnL: {pnl_global:+.2f} | Winrate: {winrate:.1f}%")
-
-            if activos_count < MAX_CONCURRENT_TRADES and ultima_vela != vela_cerrada:
+            winrate = (PAPER_WIN/PAPER_TRADES_TOTALES*100) if PAPER_TRADES_TOTALES>0 else 0
+            activos = len(PAPER_ACTIVE_TRADES)
+            print(f"\n💓 Heartbeat | P:{precio:.2f} | ATR:{atr:.2f} | Activos:{activos}/{MAX_CONCURRENT_TRADES} | Cerrados:{PAPER_TRADES_TOTALES} | PnL:{pnl_global:+.2f} | WR:{winrate:.1f}%")
+            if activos < MAX_CONCURRENT_TRADES and ultima_vela != vela_cerrada:
                 desc, atr_val = generar_descripcion_nison(df)
-                print(f"--- Evaluando Matriz de Vela: {vela_cerrada.strftime('%H:%M')} ---")
-
+                if not desc or len(desc) < 50:
+                    print("⚠️ Descripción corta, se omite ciclo.")
+                    ultima_vela = vela_cerrada
+                    time.sleep(SLEEP_SECONDS)
+                    continue
+                print(f"--- Evaluando {vela_cerrada.strftime('%H:%M')} ---")
                 decision, razones, patron, multis = analizar_con_groq_texto(desc, atr_val, REGLAS_APRENDIDAS)
-                ULTIMA_DECISION, ULTIMO_MOTIVO = decision, razones[0] if razones else "Sin razones"
-
+                ULTIMA_DECISION, ULTIMO_MOTIVO = decision, razones[0] if razones else ""
                 if decision in ["Buy","Sell"] and risk_management_check():
                     paper_abrir_posicion(decision, precio, atr_val, razones, patron, multis, df, sop, res, slo, inter)
                 else:
-                    print(f"⏸️ Hold: {ULTIMO_MOTIVO[:80]}...")
-
+                    print(f"⏸️ Hold: {ULTIMO_MOTIVO[:80]}")
                 ultima_vela = vela_cerrada
-
             if PAPER_ACTIVE_TRADES:
                 sop, res, slo, inter, _, _ = detectar_zonas_mercado(df, -1)
                 paper_revisar_sl_tp(df, sop, res, slo, inter)
-
             time.sleep(SLEEP_SECONDS)
-
         except Exception as e:
-            print(f"❌ ERROR EN EL LOOP PRINCIPAL: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"❌ Error loop: {e}")
+            import traceback; traceback.print_exc()
             time.sleep(60)
 
 if __name__ == '__main__':
