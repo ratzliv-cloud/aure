@@ -1,4 +1,4 @@
-# BOT TRADING V99.34 – GROQ (MULTI-TRADES + BARRIDOS) - MODELO 120B + MEMORIA COMPLETA + AUTOAPRENDIZAJE CADA 10 TRADES
+# BOT TRADING V99.35 – GROQ (MULTI-TRADES + BARRIDOS) - MODELO 20B OPTIMIZADO + MEMORIA COMPLETA
 # ==============================================================================
 import os, time, requests, json, re, numpy as np, pandas as pd
 from scipy.stats import linregress
@@ -12,7 +12,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise ValueError("Falta GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
-MODELO_TEXTO = "openai/gpt-oss-120b"   # ← Mejor para detectar barridos y falsos rompimientos
+MODELO_TEXTO = "openai/gpt-oss-20b"   # ← NUEVO MODELO 20B (más rápido, económico y con excelente rendimiento financiero)
 
 # ====== MEJORAS IA (MEMORIA + JSON ROBUSTO) ======
 MEMORY_FILE = "memoria_bot.json"
@@ -342,40 +342,26 @@ def generar_descripcion_nison(df, idx=-2):
 """
     return descripcion, atr
 
-# =================== IA GROQ (MODELO 120B) ===================
+# =================== IA GROQ (MODELO 20B OPTIMIZADO) ===================
 def analizar_con_groq_texto(descripcion, atr, reglas_aprendidas):
     try:
+        # Prompt de sistema mejorado para el 20B (más conciso pero manteniendo toda la lógica)
         system_msg = f"""
-        Eres un Maestro del Price Action. Lees la "MATRIZ DE CONFLUENCIA" de forma holística.
-        Entiendes que los Soportes, Resistencias y EMAs NO SON LÍNEAS EXACTAS.
-        Si el mercado "perfora" una zona pero el cuerpo de la vela cierra devolviéndose (Barrido de Liquidez / Fakeout), sabes que es una confirmación enorme, porque han cazado los Stop Loss de los novatos.
-
-        🔥 REGLA EVOLUTIVA DE TU MENTOR:
-        "{reglas_aprendidas}"
-
-        LÓGICA OPERATIVA:
-        - Puedes operar Reversiones, Continuaciones, Rompimientos o Trampas de Liquidez en CUALQUIER zona del gráfico si la suma del contexto lo apoya.
-        - NO ignores la vela actual. Si el contexto es alcista pero la vela actual es una gran Estrella Fugaz (Oso), se anulan y es "Hold".
-        
-        IMPORTANTE: Todos los strings en el JSON DEBEN ser de una sola línea (sin saltos de línea literales). Si necesitas un salto de línea, escríbelo como '\\n'.
-        
-        Responde ÚNICAMENTE con un JSON válido en este formato:
-        {{
-          "decision": "Buy/Sell/Hold",
-          "patron": "Ej: Falso Rompimiento en EMA20 (Barrido) + Martillo en Tendencia Alcista",
-          "razones": ["Razón de Estructura/Liquidez", "Razón de Velas Exactas"],
-          "sl_mult": 1.2,
-          "tp1_mult": 1.5,
-          "trailing_mult": 1.8
-        }}
+        Eres un experto en Price Action. Analiza la matriz de confluencia y trampas de liquidez.
+        - Los soportes, resistencias y EMAs no son líneas exactas; los barridos de liquidez (mecha que perfora y cierra fuera) son señales fuertes en dirección contraria.
+        - Regla evolutiva: "{reglas_aprendidas}"
+        - Puedes operar reversiones, continuaciones o falsos rompimientos si el contexto lo apoya.
+        - La vela actual es clave: si el contexto es alcista pero la vela actual es una estrella fugaz (bajista), anula y es "Hold".
+        Responde SOLO con un JSON en una línea, sin saltos de línea dentro de las cadenas:
+        {{"decision":"Buy/Sell/Hold","patron":"nombre del patrón","razones":["razón1","razón2"],"sl_mult":1.2,"tp1_mult":1.5,"trailing_mult":1.8}}
         """
-        user_msg = f"{descripcion}\n\nATR: {atr:.2f}. Analiza trampas de liquidez y flujos. Toma tu decisión:"
+        user_msg = f"{descripcion}\nATR: {atr:.2f}"
 
         respuesta = client.chat.completions.create(
             model=MODELO_TEXTO,
             messages=[{"role": "system", "content": system_msg}, {"role": "user", "content": user_msg}],
             temperature=0.1,
-            max_tokens=600
+            max_tokens=500  # Reducido ligeramente para el 20B (suficiente)
         )
         raw = respuesta.choices[0].message.content
         if not raw or raw.strip() == "":
@@ -400,7 +386,6 @@ def aprender_de_trades():
     global ADAPTIVE_SL_MULT, ADAPTIVE_TP1_MULT, ADAPTIVE_TRAILING_MULT, ULTIMO_APRENDIZAJE, REGLAS_APRENDIDAS
     total_trades = len(TRADE_HISTORY)
     
-    # Condición de aprendizaje: al menos 10 trades cerrados y 10 nuevos desde el último aprendizaje
     if total_trades < 10:
         print(f"⏳ Aprendizaje no disponible: solo {total_trades} trades cerrados (mínimo 10).")
         return
@@ -420,14 +405,8 @@ def aprender_de_trades():
 
     system_msg = """
     Eres el Mentor de Trading de una IA. Analiza los últimos 10 trades.
-    Responde ÚNICAMENTE con un JSON:
-    {
-      "analisis": "Explicación de aciertos y errores en la lectura de fluidez y barridos",
-      "nueva_regla": "Instrucción de mejora continua para la matriz",
-      "sl_mult_sugerido": 1.5,
-      "tp1_mult_sugerido": 1.5,
-      "trailing_mult_sugerido": 1.8
-    }
+    Responde ÚNICAMENTE con un JSON en una línea:
+    {"analisis":"explicación","nueva_regla":"instrucción de mejora","sl_mult_sugerido":1.5,"tp1_mult_sugerido":1.5,"trailing_mult_sugerido":1.8}
     """
     user_msg = f"Winrate: {winrate*100:.0f}%. ({wins}W, {10-wins}L).\n\nHistorial:\n{resumen_trades}\n\nDicta la nueva regla."
 
@@ -436,7 +415,7 @@ def aprender_de_trades():
             model=MODELO_TEXTO,
             messages=[{"role": "system", "content": system_msg}, {"role": "user", "content": user_msg}],
             temperature=0.3,
-            max_tokens=500
+            max_tokens=400
         )
         raw = respuesta.choices[0].message.content
         if not raw:
@@ -453,7 +432,6 @@ def aprender_de_trades():
         nuevo_tp = max(0.8, min(3.0, float(datos.get("tp1_mult_sugerido", ADAPTIVE_TP1_MULT))))
         nuevo_trail = max(1.0, min(3.0, float(datos.get("trailing_mult_sugerido", ADAPTIVE_TRAILING_MULT))))
 
-        # Aplicar cambios
         REGLAS_APRENDIDAS = nueva_regla
         ADAPTIVE_SL_MULT = nuevo_sl
         ADAPTIVE_TP1_MULT = nuevo_tp
@@ -467,7 +445,6 @@ def aprender_de_trades():
         telegram_mensaje(msg_telegram)
         print(f"\n{msg_telegram}\n")
         
-        # Actualizar y guardar
         ULTIMO_APRENDIZAJE = total_trades
         guardar_memoria()
         print(f"✅ Aprendizaje completado y guardado. Próximo aprendizaje en {ULTIMO_APRENDIZAJE + 10} trades.")
@@ -678,7 +655,6 @@ def paper_revisar_sl_tp(df, sop, res, slo, inter):
     for t_id in trades_a_cerrar:
         del PAPER_ACTIVE_TRADES[t_id]
 
-    # Ejecutar aprendizaje cada vez que se cierren trades y el total sea múltiplo de 10
     if trades_a_cerrar and PAPER_TRADES_TOTALES > 0 and PAPER_TRADES_TOTALES % 10 == 0:
         aprender_de_trades()
 
@@ -686,8 +662,8 @@ def paper_revisar_sl_tp(df, sop, res, slo, inter):
 def run_bot():
     global ULTIMA_DECISION, ULTIMO_MOTIVO
     cargar_memoria()
-    print("🤖 BOT V99.34 INICIADO - Multi-Trades y Detección de Barridos (Liquidity Sweeps)")
-    telegram_mensaje("🤖 BOT V99.34 INICIADO - Sistema Multi-Trades Activado (Modelo 120B).")
+    print("🤖 BOT V99.35 INICIADO - Multi-Trades y Detección de Barridos (Modelo 20B Optimizado)")
+    telegram_mensaje("🤖 BOT V99.35 INICIADO - Sistema Multi-Trades Activado (Modelo 20B).")
 
     ultima_vela = None
     while True:
