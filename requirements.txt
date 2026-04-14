@@ -1,6 +1,7 @@
 groq
 requests
-pandas
 numpy
+pandas
 scipy
 matplotlib
+json-repair
