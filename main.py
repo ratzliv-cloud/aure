@@ -169,7 +169,7 @@ def telegram_enviar_imagen(ruta_imagen, caption=""):
     except Exception as e:
         print(f"Error imagen: {e}")
 
-# =================== DATOS E INDICADORES (igual que antes) ===================
+# =================== DATOS E INDICADORES ===================
 def obtener_velas(limit=150):
     try:
         r = requests.get(f"{BASE_URL}/v5/market/kline", params={"category": "linear", "symbol": SYMBOL, "interval": INTERVAL, "limit": limit}, timeout=20)
@@ -217,7 +217,7 @@ def detectar_zonas_mercado(df, idx=-2, ventana_macro=120):
     tendencia = 'ALCISTA' if slope > 0.01 else 'BAJISTA' if slope < -0.01 else 'LATERAL'
     return soporte, resistencia, slope, intercept, tendencia, micro_tendencia
 
-# =================== MOTOR HOLÍSTICO (igual que antes, con lateralidad) ===================
+# =================== MOTOR HOLÍSTICO ENRIQUECIDO (SIN PROHIBICIONES) ===================
 def analizar_anatomia_vela(v):
     rango = v['high'] - v['low']
     if rango == 0: return "Doji Plano (0%)"
@@ -254,131 +254,141 @@ def analizar_patrones_conjuntos(df, idx):
 def generar_descripcion_nison(df, idx=-2):
     if df.empty or len(df) < abs(idx)+1:
         return "Datos insuficientes", 0
+
     vela_actual = df.iloc[idx]
     precio = vela_actual['close']
     atr = df['atr'].iloc[idx]
     ema20 = df['ema20'].iloc[idx]
+    ema50 = df['ema50'].iloc[idx] if 'ema50' in df.columns else ema20
 
     soporte, resistencia, slope, intercept, tendencia, micro = detectar_zonas_mercado(df, idx)
-    patrones_generales = analizar_patrones_conjuntos(df, idx)
+    patrones = analizar_patrones_conjuntos(df, idx)
 
-    anat_v1 = analizar_anatomia_vela(df.iloc[idx-2]) if idx-2 >= 0 else "N/A"
-    anat_v2 = analizar_anatomia_vela(df.iloc[idx-1]) if idx-1 >= 0 else "N/A"
-    anat_v3 = analizar_anatomia_vela(df.iloc[idx]) if idx >= 0 else "N/A"
+    # ========== 1. Datos cuantitativos de niveles ==========
+    dist_sop_atr = (precio - soporte) / atr if atr > 0 else 0
+    dist_res_atr = (resistencia - precio) / atr if atr > 0 else 0
+    dist_ema_atr = (precio - ema20) / atr
 
-    # Lateralidad (información útil, no una regla)
-    ultimas_10 = df.iloc[max(0, idx-9):idx+1] if idx >= 9 else df.iloc[:idx+1]
-    if len(ultimas_10) >= 5:
-        sobre_ema = (ultimas_10['close'] > ultimas_10['ema20']).sum()
-        pct_sobre = (sobre_ema / len(ultimas_10)) * 100
-        lateralidad = f"Últimas {len(ultimas_10)} velas: {pct_sobre:.0f}% sobre EMA20."
-        if 40 <= pct_sobre <= 60:
-            lateralidad += " Mercado en rango estrecho (posible consolidación)."
-        elif pct_sobre > 70:
-            lateralidad += " Tendencia alcista dominante."
-        elif pct_sobre < 30:
-            lateralidad += " Tendencia bajista dominante."
+    # Historial de interacción con soporte (últimas 10 velas)
+    df_hist = df.iloc[max(0, idx-10):idx+1]
+    toques_soporte = sum((df_hist['low'] <= soporte * 1.002) & (df_hist['close'] > soporte))
+    barridos_soporte = sum((df_hist['low'] < soporte) & (df_hist['close'] > soporte))
+
+    # ========== 2. Detección de cambio de rol ==========
+    soporte_roto = precio < soporte - 0.3 * atr
+    resistencia_rota = precio > resistencia + 0.3 * atr
+    nuevo_soporte = resistencia if resistencia_rota else soporte
+    nueva_resistencia = soporte if soporte_roto else resistencia
+
+    # ========== 3. Tabla de últimas 5 velas (datos crudos) ==========
+    ultimas_velas = []
+    for i in range(max(0, idx-4), idx+1):
+        v = df.iloc[i]
+        rango = v['high'] - v['low']
+        cuerpo_pct = (abs(v['close'] - v['open']) / rango * 100) if rango > 0 else 0
+        mecha_sup_pct = ((v['high'] - max(v['close'], v['open'])) / rango * 100) if rango > 0 else 0
+        mecha_inf_pct = ((min(v['close'], v['open']) - v['low']) / rango * 100) if rango > 0 else 0
+        ultimas_velas.append({
+            'open': round(v['open'],2),
+            'close': round(v['close'],2),
+            'high': round(v['high'],2),
+            'low': round(v['low'],2),
+            'cuerpo%': round(cuerpo_pct,1),
+            'mecha_sup%': round(mecha_sup_pct,1),
+            'mecha_inf%': round(mecha_inf_pct,1),
+            'color': 'VERDE' if v['close'] > v['open'] else 'ROJA'
+        })
+
+    # ========== 4. Volumen relativo ==========
+    if 'volume' in df.columns:
+        vol_actual = df['volume'].iloc[idx]
+        vol_media = df['volume'].iloc[max(0, idx-20):idx+1].mean()
+        vol_rel = vol_actual / vol_media if vol_media > 0 else 1.0
+        volumen_str = f"Volumen actual = {vol_rel:.2f}x media (20 velas)"
     else:
-        lateralidad = "Datos insuficientes para evaluar rango."
+        volumen_str = "Datos de volumen no disponibles"
 
-    margen_fakeout = atr * 0.4
-    if precio > ema20:
-        if vela_actual['low'] < (ema20 - margen_fakeout):
-            rol_ema = "🔥 BARRIDO DE LIQUIDEZ EN EMA20 (alcista): mecha larga por debajo, cierre por encima. Señal de compra."
-        elif vela_actual['low'] <= ema20:
-            rol_ema = "✅ EMA20 actuando como SOPORTE DINÁMICO."
-        else:
-            rol_ema = "Cabalgando SOBRE EMA20 (fuerza compradora)."
-    else:
-        if vela_actual['high'] > (ema20 + margen_fakeout):
-            rol_ema = "🔥 BARRIDO DE LIQUIDEZ EN EMA20 (bajista): mecha larga por encima, cierre por debajo. Señal de venta."
-        elif vela_actual['high'] >= ema20:
-            rol_ema = "❌ EMA20 actuando como RESISTENCIA DINÁMICA."
-        else:
-            rol_ema = "Presionado BAJO EMA20 (fuerza vendedora)."
-
-    polaridad = f"Precio: {precio:.2f}. "
-    if vela_actual['low'] < soporte and precio > soporte:
-        polaridad += f"🔥 SPRING (barrido en soporte {soporte:.2f}) -> probable alza."
-    elif vela_actual['high'] > resistencia and precio < resistencia:
-        polaridad += f"🚨 UPTHRUST (barrido en resistencia {resistencia:.2f}) -> probable baja."
-    elif precio > resistencia and vela_actual['low'] <= resistencia * 1.005:
-        polaridad += "Throwback alcista (resistencia rota y testeada como soporte)."
-    elif precio < soporte and vela_actual['high'] >= soporte * 0.995:
-        polaridad += "Pullback bajista (soporte roto y testeado como resistencia)."
-    else:
-        polaridad += "Flujo normal dentro del rango."
-
-    df_mechas = df.iloc[max(0, idx-7):idx+1] if idx >= 7 else df.iloc[:idx+1]
-    if len(df_mechas) >= 3:
-        rangos = df_mechas['high'] - df_mechas['low']
-        mechas_sup = (df_mechas['high'] - df_mechas[['close','open']].max(axis=1)) / rangos.replace(0, 0.001)
-        mechas_inf = (df_mechas[['close','open']].min(axis=1) - df_mechas['low']) / rangos.replace(0, 0.001)
-        cluster_txt = f"{sum(mechas_sup>0.55)} mechas superiores (venta) | {sum(mechas_inf>0.55)} mechas inferiores (compra)."
-    else:
-        cluster_txt = "Datos insuficientes para clusters."
-
+    # ========== 5. Construcción del prompt estructurado ==========
     descripcion = f"""
-=== MATRIZ DE CONFLUENCIA Y TRAMPAS DE LIQUIDEZ (5M) ===
+=== ESTRUCTURA COMPLETA DEL MERCADO (solo hechos cuantitativos) ===
 
-1. TENDENCIA Y ESTRUCTURA GLOBAL
-- Tendencia Macro: {tendencia} | Impulso Micro: {micro}
-- Soportes/Resistencias: {polaridad}
+📐 PARÁMETROS CLAVE:
+- Precio actual: {precio:.2f}
+- ATR (14): {atr:.2f}
+- EMA20: {ema20:.2f} | EMA50: {ema50:.2f}
+- Soporte estático (40 velas): {soporte:.2f}
+- Resistencia estática (40 velas): {resistencia:.2f}
 
-2. EMA20 Y BARRIDOS
-- Acción sobre EMA: {rol_ema}
-- {lateralidad}
+📏 DISTANCIAS (en ATR):
+- Precio - Soporte = {dist_sop_atr:.2f} ATR
+- Resistencia - Precio = {dist_res_atr:.2f} ATR
+- Precio - EMA20 = {dist_ema_atr:.2f} ATR
 
-3. PRESIÓN OCULTA (últimas 8 velas)
-- {cluster_txt}
+🔄 CAMBIO DE ROL (solo si ruptura clara >0.3 ATR):
+- ¿Soporte roto (ahora es resistencia)? {"SÍ" if soporte_roto else "NO"}
+- ¿Resistencia rota (ahora es soporte)? {"SÍ" if resistencia_rota else "NO"}
+- Nuevo soporte sugerido: {nuevo_soporte:.2f}
+- Nueva resistencia sugerida: {nueva_resistencia:.2f}
 
-4. ANATOMÍA EXACTA DE VELAS (Cuerpos y Mechas)
-- Vela Antepenúltima: {anat_v1}
-- Vela Penúltima: {anat_v2}
-- Vela Actual (Gatillo): {anat_v3}
+🧪 HISTORIAL DE INTERACCIÓN CON SOPORTE (últimas 10 velas):
+- Toques respetuosos (low <= soporte+0.2% y cierre > soporte): {toques_soporte}
+- Barridos de liquidez (low < soporte y cierre > soporte): {barridos_soporte}
 
-5. PATRONES IDENTIFICADOS (Conjunto)
-- {patrones_generales}
+📊 TABLA DE ÚLTIMAS 5 VELAS (de más antigua a más actual):
+| Apertura | Cierre | Máx | Mín | Cuerpo% | MechSup% | MechInf% | Color |
+|----------|--------|-----|-----|---------|----------|----------|-------|
+"""
+    for v in ultimas_velas:
+        descripcion += f"| {v['open']} | {v['close']} | {v['high']} | {v['low']} | {v['cuerpo%']} | {v['mecha_sup%']} | {v['mecha_inf%']} | {v['color']} |\n"
+
+    descripcion += f"""
+📈 TENDENCIA GLOBAL:
+- Macro (120 velas): {tendencia} (pendiente {slope:.4f})
+- Micro (8 velas): {micro}
+- {volumen_str}
+
+🔍 PATRONES DETECTADOS:
+- {patrones}
+
+🎯 ANATOMÍA DE LA VELA ACTUAL (GATILLO):
+- {analizar_anatomia_vela(vela_actual)}
+- Relación con EMA20: {"por encima" if precio > ema20 else "por debajo"}
+- Relación con soporte: {"por encima" if precio > soporte else "por debajo"}
+
+--- FIN DE DATOS ESTRUCTURADOS ---
 """
     return descripcion, atr
 
-# =================== IA GROQ (PROMPT HOLÍSTICO, SIN PROHIBICIONES) ===================
+# =================== IA GROQ (PROMPT PROFESIONAL, SIN PROHIBICIONES) ===================
 def analizar_con_groq_texto(descripcion, atr, reglas_aprendidas):
     try:
         system_msg = f"""
-Eres un Maestro del Price Action. Lees la "MATRIZ DE CONFLUENCIA" de forma holística.
-Entiendes que los Soportes, Resistencias y EMAs NO SON LÍNEAS EXACTAS.
-Si el mercado "perfora" una zona pero el cuerpo de la vela cierra devolviéndose (Barrido de Liquidez / Fakeout), sabes que es una confirmación enorme, porque han cazado los Stop Loss de los novatos.
+Eres un trader profesional de price action con 20 años de experiencia. Tu labor es **analizar los datos estructurados** que se te proporcionan y tomar una decisión de trading (Buy/Sell/Hold) basada en la **confluencia de factores reales**.
 
-🔥 REGLA EVOLUTIVA DE TU MENTOR:
+No tienes reglas fijas de "nunca hagas X". En lugar de eso, aplicas tu juicio experto considerando:
+
+1. **Estructura de mercado**: ¿El precio está respetando soportes/resistencias o los está rompiendo con fuerza? Una ruptura con cierre claro (distancia > 0.3 ATR) y volumen alto es válida; un simple toque o barrido (wick) es una trampa de liquidez.
+2. **Cambio de rol**: Si un soporte es perforado pero el precio cierra por encima, sigue siendo soporte. Si cierra claramente por debajo, se convierte en resistencia. Aplica la misma lógica a las resistencias.
+3. **Contexto de velas**: Una serie de velas verdes seguidas de una pequeña vela roja no invalida la tendencia. Las mechas largas indican rechazo.
+4. **Volumen**: Una ruptura con volumen bajo es sospechosa (falsa); con volumen alto es creíble.
+5. **EMA como filtro**: El precio por encima de EMA20 con pendiente positiva favorece buys; por debajo con pendiente negativa favorece sells. Pero no es absoluto: puede haber reversiones en EMA si hay patrones de agotamiento.
+
+Tu respuesta debe ser un JSON con los campos: decision, patron, razones (lista de 2-3 frases cortas), sl_mult, tp1_mult, trailing_mult.
+
+Ajusta los multiplicadores según la volatilidad (ATR) y la claridad de la señal. Usa valores más conservadores si el contexto es ambiguo.
+
+Contexto aprendido hasta ahora:
 "{reglas_aprendidas}"
 
-LÓGICA OPERATIVA:
-- Puedes operar Reversiones, Continuaciones, Rompimientos o Trampas de Liquidez en CUALQUIER zona del gráfico si la suma del contexto lo apoya.
-- NO ignores la vela actual. Si el contexto es alcista pero la vela actual es una gran Estrella Fugaz (Oso), se anulan y es "Hold".
-- Evalúa la confluencia de todos los datos: tendencia, patrones, clusters, acción de la EMA, barridos.
-- Si el mercado está en rango estrecho (lateralidad alta), espera una señal clara (barrido o patrón) antes de operar.
-- Ajusta los multiplicadores de SL, TP1 y trailing según la volatilidad (ATR) y la confianza de la señal.
-
 IMPORTANTE: Todos los strings en el JSON DEBEN ser de una sola línea (sin saltos de línea literales). Si necesitas un salto de línea, escríbelo como '\\n'.
-
-Responde ÚNICAMENTE con un JSON válido en este formato:
-{{
-  "decision": "Buy/Sell/Hold",
-  "patron": "Ej: Falso Rompimiento en EMA20 (Barrido) + Martillo en Tendencia Alcista",
-  "razones": ["Razón de Estructura/Liquidez", "Razón de Velas Exactas"],
-  "sl_mult": 1.2,
-  "tp1_mult": 1.5,
-  "trailing_mult": 1.8
-}}
 """
-        user_msg = f"{descripcion}\n\nATR: {atr:.2f}. Analiza trampas de liquidez y flujos. Toma tu decisión:"
+        user_msg = f"{descripcion}\n\nATR: {atr:.2f}. Analiza trampas de liquidez y flujos. Toma tu decisión profesional:"
 
         respuesta = client.chat.completions.create(
             model=MODELO_TEXTO,
             messages=[{"role": "system", "content": system_msg}, {"role": "user", "content": user_msg}],
             temperature=0.0,
-            max_tokens=600
+            max_tokens=800
         )
         raw = respuesta.choices[0].message.content
         if not raw or raw.strip() == "":
@@ -444,7 +454,7 @@ Responde ÚNICAMENTE con un JSON en una línea:
     except Exception as e:
         print(f"Error aprendizaje: {e}")
 
-# =================== GRÁFICOS (igual que antes) ===================
+# =================== GRÁFICOS ===================
 def generar_grafico(df, trade_info, soporte, resistencia, slope, intercept, tipo="Entrada"):
     if df.empty:
         return None
@@ -484,7 +494,7 @@ def generar_grafico(df, trade_info, soporte, resistencia, slope, intercept, tipo
     plt.close()
     return ruta
 
-# =================== GESTIÓN MULTI-TRADE (igual que antes) ===================
+# =================== GESTIÓN MULTI-TRADE ===================
 def risk_management_check():
     global PAPER_DAILY_START_BALANCE, PAPER_STOPPED_TODAY, PAPER_CURRENT_DAY
     hoy = datetime.now(timezone.utc).date()
