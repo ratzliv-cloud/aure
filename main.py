@@ -1,4 +1,4 @@
-# BOT TRADING V99.38 – GEMINI (MULTI-TRADES + BARRIDOS + VISIÓN) - MODELO GEMINI 1.5 FLASH CON RAZONAMIENTO HOLÍSTICO
+# BOT TRADING V99.38 – GEMINI 2.5 FLASH (MULTI-TRADES + BARRIDOS + VISIÓN) - MODELO GEMINI 2.5 FLASH CON RAZONAMIENTO HOLÍSTICO
 # ==============================================================================
 import os, time, requests, json, re, numpy as np, pandas as pd
 from scipy.stats import linregress
@@ -16,7 +16,7 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GOOGLE_API_KEY:
     raise ValueError("Falta GOOGLE_API_KEY")
 genai.configure(api_key=GOOGLE_API_KEY)
-MODELO_VISION = "gemini-1.5-flash"   # Modelo que acepta imágenes
+MODELO_VISION = "gemini-2.5-flash"   # Modelo multimodal que acepta imágenes
 
 # ====== MEMORIA (con corrección de serialización) ======
 MEMORY_FILE = "memoria_bot.json"
@@ -154,7 +154,7 @@ REGLAS_APRENDIDAS = "Aún no hay trades. Busca confluencia entre tendencia, patr
 ULTIMA_DECISION = "Hold"
 ULTIMA_MOTIVO = "Esperando señal"
 
-TOKENS_ACUMULADOS = 0  # Gemini no reporta tokens fácilmente, se usará contador aproximado
+TOKENS_ACUMULADOS = 0  # estimación aproximada
 
 # =================== COMUNICACIÓN ===================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -397,7 +397,7 @@ def generar_grafico_para_vision(df, soporte, resistencia, slope, intercept, ulti
     plt.close()
     return img
 
-# =================== IA GEMINI (VISIÓN + TEXTO) ===================
+# =================== IA GEMINI 2.5 FLASH (VISIÓN + TEXTO) ===================
 def analizar_con_gemini(descripcion_texto, atr, reglas_aprendidas, imagen):
     global TOKENS_ACUMULADOS
     try:
@@ -433,12 +433,12 @@ Aquí está la descripción textual del mercado:
 
 ATR: {atr:.2f}. Analiza trampas de liquidez y flujos. Toma tu decisión basándote tanto en el texto como en la imagen del gráfico.
 """
-        # Usar el modelo de Gemini que acepta imágenes
+        # Usar el modelo Gemini 2.5 Flash
         model = genai.GenerativeModel(MODELO_VISION)
         response = model.generate_content([prompt, imagen])
         raw = response.text
-        # Estimación de tokens (aproximada, Gemini no lo da fácil)
-        TOKENS_ACUMULADOS += len(raw.split()) + len(prompt.split()) + 1000  # estimación burda
+        # Estimación de tokens (aproximada)
+        TOKENS_ACUMULADOS += len(raw.split()) + len(prompt.split()) + 1000
         print(f"📊 Tokens estimados acumulados: {TOKENS_ACUMULADOS}")
 
         if not raw or raw.strip() == "":
@@ -501,7 +501,7 @@ Responde ÚNICAMENTE con un JSON en una línea:
     except Exception as e:
         print(f"Error aprendizaje: {e}")
 
-# =================== GRÁFICOS PARA TELEGRAM (sin cambios) ===================
+# =================== GRÁFICOS PARA TELEGRAM ===================
 def generar_grafico(df, trade_info, soporte, resistencia, slope, intercept, tipo="Entrada"):
     if df.empty:
         return None
@@ -687,7 +687,7 @@ def run_bot():
                     ultima_vela = vela_cerrada
                     time.sleep(SLEEP_SECONDS)
                     continue
-                print(f"--- Evaluando {vela_cerrada.strftime('%H:%M')} con Gemini (imagen + texto) ---")
+                print(f"--- Evaluando {vela_cerrada.strftime('%H:%M')} con Gemini 2.5 Flash (imagen + texto) ---")
                 # Generar gráfico para Gemini
                 img = generar_grafico_para_vision(df, sop, res, slo, inter, precio)
                 if img is None:
