@@ -624,6 +624,8 @@ def paper_revisar_sl_tp(df, sop, res, slo, inter):
             guardar_memoria()
             msg = f"📤 [{motivo}] #{t_id} {t['decision'].upper()} -> {t['sl_actual']:.2f} | PnL: {pnl_total:.2f} USD"
             telegram_mensaje(msg)
+            # Enviar reporte de estado completo después de cerrar el trade
+            reporte_estado()
             ruta_img = generar_grafico(df, t, sop, res, slo, inter, "Salida")
             if ruta_img:
                 telegram_enviar_imagen(ruta_img, msg)
@@ -658,10 +660,7 @@ def run_bot():
             activos = len(PAPER_ACTIVE_TRADES)
             print(f"\n💓 Heartbeat | P:{precio:.2f} | ATR:{atr:.2f} | Activos:{activos}/{MAX_CONCURRENT_TRADES} | Cerrados:{PAPER_TRADES_TOTALES} | PnL:{pnl_global:+.2f} | WR:{winrate:.1f}% | Tokens:{TOKENS_ACUMULADOS}")
             
-            # Reporte de estado cada 10 ciclos (aproximadamente cada 10 minutos)
-            CONTADOR_CICLOS += 1
-            if CONTADOR_CICLOS % 10 == 0:
-                reporte_estado()
+            # ELIMINADO: reporte de estado cada 10 ciclos
             
             if activos < MAX_CONCURRENT_TRADES and ultima_vela != vela_cerrada:
                 desc, atr_val = generar_descripcion_nison(df)
