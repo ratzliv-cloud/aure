@@ -5,3 +5,5 @@ pandas
 scipy
 matplotlib
 json-repair
+google-generativeai 
+pillow
