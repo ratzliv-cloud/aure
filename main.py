@@ -241,7 +241,7 @@ def detectar_zonas_mercado(df, idx=-2, ventana_macro=120):
     tendencia = 'ALCISTA' if slope > 0.01 else 'BAJISTA' if slope < -0.01 else 'LATERAL'
     return soporte, resistencia, slope, intercept, tendencia, micro_tendencia
 
-# =================== MOTOR HOLÍSTICO ===================
+# =================== MOTOR HOLÍSTICO (VERSIÓN NEUTRAL) ===================
 def analizar_anatomia_vela(v):
     rango = v['high'] - v['low']
     if rango == 0: return "Doji Plano (0%)"
@@ -276,92 +276,72 @@ def analizar_patrones_conjuntos(df, idx):
     return " | ".join(patrones) if patrones else "Consolidación normal"
 
 def generar_descripcion_nison(df, idx=-2):
+    """
+    Versión NEUTRAL: solo entrega datos crudos, sin interpretar barridos,
+    roles de EMA, ni conclusiones de soporte/resistencia.
+    Gemini tomará sus propias decisiones basándose en la imagen + estos números.
+    """
     if df.empty or len(df) < abs(idx)+1:
         return "Datos insuficientes", 0
+
     vela_actual = df.iloc[idx]
     precio = vela_actual['close']
     atr = df['atr'].iloc[idx]
     ema20 = df['ema20'].iloc[idx]
 
     soporte, resistencia, slope, intercept, tendencia, micro = detectar_zonas_mercado(df, idx)
-    patrones_generales = analizar_patrones_conjuntos(df, idx)
 
+    # Anatomía de las últimas 3 velas
     anat_v1 = analizar_anatomia_vela(df.iloc[idx-2]) if idx-2 >= 0 else "N/A"
     anat_v2 = analizar_anatomia_vela(df.iloc[idx-1]) if idx-1 >= 0 else "N/A"
     anat_v3 = analizar_anatomia_vela(df.iloc[idx]) if idx >= 0 else "N/A"
 
-    ultimas_10 = df.iloc[max(0, idx-9):idx+1] if idx >= 9 else df.iloc[:idx+1]
-    if len(ultimas_10) >= 5:
-        sobre_ema = (ultimas_10['close'] > ultimas_10['ema20']).sum()
-        pct_sobre = (sobre_ema / len(ultimas_10)) * 100
-        lateralidad = f"Últimas {len(ultimas_10)} velas: {pct_sobre:.0f}% sobre EMA20."
-        if 40 <= pct_sobre <= 60:
-            lateralidad += " Mercado en rango estrecho (posible consolidación)."
-        elif pct_sobre > 70:
-            lateralidad += " Tendencia alcista dominante."
-        elif pct_sobre < 30:
-            lateralidad += " Tendencia bajista dominante."
-    else:
-        lateralidad = "Datos insuficientes para evaluar rango."
+    # Patrones clásicos (sin forzar barridos)
+    patrones_generales = analizar_patrones_conjuntos(df, idx)
 
-    margen_fakeout = atr * 0.4
-    if precio > ema20:
-        if vela_actual['low'] < (ema20 - margen_fakeout):
-            rol_ema = "🔥 BARRIDO DE LIQUIDEZ EN EMA20 (alcista): mecha larga por debajo, cierre por encima. Señal de compra."
-        elif vela_actual['low'] <= ema20:
-            rol_ema = "✅ EMA20 actuando como SOPORTE DINÁMICO."
-        else:
-            rol_ema = "Cabalgando SOBRE EMA20 (fuerza compradora)."
-    else:
-        if vela_actual['high'] > (ema20 + margen_fakeout):
-            rol_ema = "🔥 BARRIDO DE LIQUIDEZ EN EMA20 (bajista): mecha larga por encima, cierre por debajo. Señal de venta."
-        elif vela_actual['high'] >= ema20:
-            rol_ema = "❌ EMA20 actuando como RESISTENCIA DINÁMICA."
-        else:
-            rol_ema = "Presionado BAJO EMA20 (fuerza vendedora)."
-
-    polaridad = f"Precio: {precio:.2f}. "
-    if vela_actual['low'] < soporte and precio > soporte:
-        polaridad += f"🔥 SPRING (barrido en soporte {soporte:.2f}) -> probable alza."
-    elif vela_actual['high'] > resistencia and precio < resistencia:
-        polaridad += f"🚨 UPTHRUST (barrido en resistencia {resistencia:.2f}) -> probable baja."
-    elif precio > resistencia and vela_actual['low'] <= resistencia * 1.005:
-        polaridad += "Throwback alcista (resistencia rota y testeada como soporte)."
-    elif precio < soporte and vela_actual['high'] >= soporte * 0.995:
-        polaridad += "Pullback bajista (soporte roto y testeado como resistencia)."
-    else:
-        polaridad += "Flujo normal dentro del rango."
-
+    # Clusters de mechas (solo conteo, sin interpretación)
     df_mechas = df.iloc[max(0, idx-7):idx+1] if idx >= 7 else df.iloc[:idx+1]
     if len(df_mechas) >= 3:
         rangos = df_mechas['high'] - df_mechas['low']
         mechas_sup = (df_mechas['high'] - df_mechas[['close','open']].max(axis=1)) / rangos.replace(0, 0.001)
         mechas_inf = (df_mechas[['close','open']].min(axis=1) - df_mechas['low']) / rangos.replace(0, 0.001)
-        cluster_txt = f"{sum(mechas_sup>0.55)} mechas superiores (venta) | {sum(mechas_inf>0.55)} mechas inferiores (compra)."
+        cluster_txt = f"Mechas sup>55%: {sum(mechas_sup>0.55)} | Mechas inf>55%: {sum(mechas_inf>0.55)}"
     else:
         cluster_txt = "Datos insuficientes para clusters."
 
+    # Porcentaje de velas sobre EMA20 (sin decir si es soporte o resistencia)
+    ultimas_10 = df.iloc[max(0, idx-9):idx+1] if idx >= 9 else df.iloc[:idx+1]
+    if len(ultimas_10) >= 5:
+        sobre_ema = (ultimas_10['close'] > ultimas_10['ema20']).sum()
+        pct_sobre = (sobre_ema / len(ultimas_10)) * 100
+        lateralidad = f"{len(ultimas_10)} velas: {pct_sobre:.0f}% cierran sobre EMA20"
+    else:
+        lateralidad = "Datos insuficientes para evaluar EMA20."
+
     descripcion = f"""
-=== MATRIZ DE CONFLUENCIA Y TRAMPAS DE LIQUIDEZ (5M) ===
+=== DATOS DE MERCADO (sin interpretación) ===
 
-1. TENDENCIA Y ESTRUCTURA GLOBAL
-- Tendencia Macro: {tendencia} | Impulso Micro: {micro}
-- Soportes/Resistencias: {polaridad}
+Precio: {precio:.2f}
+ATR: {atr:.2f}
+EMA20: {ema20:.2f}
+Soporte (40 velas): {soporte:.2f}
+Resistencia (40 velas): {resistencia:.2f}
+Tendencia macro (regresión 120v): {tendencia}
+Micro tendencia (8 velas): {micro}
 
-2. EMA20 Y BARRIDOS
-- Acción sobre EMA: {rol_ema}
-- {lateralidad}
+Anatomía de velas (últimas 3):
+- Vela -2: {anat_v1}
+- Vela -1: {anat_v2}
+- Vela 0 (actual): {anat_v3}
 
-3. PRESIÓN OCULTA (últimas 8 velas)
-- {cluster_txt}
+Patrones reconocidos (3 velas consecutivas):
+{patrones_generales}
 
-4. ANATOMÍA EXACTA DE VELAS (Cuerpos y Mechas)
-- Vela Antepenúltima: {anat_v1}
-- Vela Penúltima: {anat_v2}
-- Vela Actual (Gatillo): {anat_v3}
+Clusters de mechas (últimas 8 velas):
+{cluster_txt}
 
-5. PATRONES IDENTIFICADOS (Conjunto)
-- {patrones_generales}
+Posición relativa respecto a EMA20:
+{lateralidad}
 """
     return descripcion, atr
 
@@ -402,18 +382,17 @@ def analizar_con_gemini(descripcion_texto, atr, reglas_aprendidas, imagen):
     global TOKENS_ACUMULADOS
     try:
         prompt = f"""
-Eres un Maestro del Price Action. Lees la "MATRIZ DE CONFLUENCIA" (texto) y observas el GRÁFICO DE VELAS (imagen) de forma holística.
-Entiendes que los Soportes, Resistencias y EMAs NO SON LÍNEAS EXACTAS.
-Si el mercado "perfora" una zona pero el cuerpo de la vela cierra devolviéndose (Barrido de Liquidez / Fakeout), sabes que es una confirmación enorme, porque han cazado los Stop Loss de los novatos.
+Eres un Maestro del Price Action. Lees los DATOS NUMÉRICOS (texto) y observas el GRÁFICO DE VELAS (imagen) de forma holística.
+Los niveles (soportes, resistencias, EMA20) son relativos, no líneas exactas. El mercado puede perforarlos ligeramente para cazar liquidez y luego revertir.
+Tu tarea es interpretar visualmente el gráfico y usar los datos solo como referencia numérica.
 
 🔥 REGLA EVOLUTIVA DE TU MENTOR:
 "{reglas_aprendidas}"
 
 LÓGICA OPERATIVA:
-- Puedes operar Reversiones, Continuaciones, Rompimientos o Trampas de Liquidez en CUALQUIER zona del gráfico si la suma del contexto lo apoya.
-- NO ignores la vela actual. Si el contexto es alcista pero la vela actual es una gran Estrella Fugaz (Oso), se anulan y es "Hold".
-- Evalúa la confluencia de todos los datos: tendencia, patrones, clusters, acción de la EMA, barridos.
-- Si el mercado está en rango estrecho (lateralidad alta), espera una señal clara (barrido o patrón) antes de operar.
+- Puedes operar Reversiones, Continuaciones, Rompimientos o Trampas de Liquidez en CUALQUIER zona si la suma del contexto lo apoya.
+- Evalúa la confluencia de todo: tendencia visual, patrones de velas, clusters de mechas, acción de la EMA.
+- Si el mercado está en rango estrecho (muchas velas laterales), espera una señal clara (barrido o patrón de reversal) antes de operar.
 - Ajusta los multiplicadores de SL, TP1 y trailing según la volatilidad (ATR) y la confianza de la señal.
 
 IMPORTANTE: Todos los strings en el JSON DEBEN ser de una sola línea (sin saltos de línea literales). Si necesitas un salto de línea, escríbelo como '\\n'.
@@ -421,23 +400,21 @@ IMPORTANTE: Todos los strings en el JSON DEBEN ser de una sola línea (sin salto
 Responde ÚNICAMENTE con un JSON válido en este formato:
 {{
   "decision": "Buy/Sell/Hold",
-  "patron": "Ej: Falso Rompimiento en EMA20 (Barrido) + Martillo en Tendencia Alcista",
+  "patron": "Ej: Falso Rompimiento en EMA20 + Martillo en Tendencia Alcista",
   "razones": ["Razón de Estructura/Liquidez", "Razón de Velas Exactas"],
   "sl_mult": 1.2,
   "tp1_mult": 1.5,
   "trailing_mult": 1.8
 }}
 
-Aquí está la descripción textual del mercado:
+Aquí están los datos numéricos (sin interpretación):
 {descripcion_texto}
 
-ATR: {atr:.2f}. Analiza trampas de liquidez y flujos. Toma tu decisión basándote tanto en el texto como en la imagen del gráfico.
+ATR: {atr:.2f}. Toma tu decisión basándote tanto en los números como en la imagen del gráfico.
 """
-        # Usar el modelo Gemini 2.5 Flash
         model = genai.GenerativeModel(MODELO_VISION)
         response = model.generate_content([prompt, imagen])
         raw = response.text
-        # Estimación de tokens (aproximada)
         TOKENS_ACUMULADOS += len(raw.split()) + len(prompt.split()) + 1000
         print(f"📊 Tokens estimados acumulados: {TOKENS_ACUMULADOS}")
 
@@ -688,7 +665,6 @@ def run_bot():
                     time.sleep(SLEEP_SECONDS)
                     continue
                 print(f"--- Evaluando {vela_cerrada.strftime('%H:%M')} con Gemini 2.5 Flash (imagen + texto) ---")
-                # Generar gráfico para Gemini
                 img = generar_grafico_para_vision(df, sop, res, slo, inter, precio)
                 if img is None:
                     print("⚠️ No se pudo generar imagen, se omite ciclo.")
