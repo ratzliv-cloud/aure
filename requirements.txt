@@ -7,3 +7,4 @@ matplotlib
 json-repair
 google-generativeai 
 pillow
+re
