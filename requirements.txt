@@ -1,10 +1,8 @@
-groq
-requests
+google-generativeai
+json-repair
 numpy
 pandas
 scipy
 matplotlib
-json-repair
-google-generativeai 
-pillow
-re
+Pillow
+requests
