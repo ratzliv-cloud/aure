@@ -1,6 +1,6 @@
 # BOT TRADING V99.38 – GEMINI 2.5 FLASH (MULTI-TRADES + BARRIDOS + VISIÓN) - MODELO GEMINI 2.5 FLASH CON RAZONAMIENTO HOLÍSTICO
 # ==============================================================================
-import os, time, requests, json, re, numpy as np, pandas as pd   # <-- añadido re
+import os, time, requests, json, re, numpy as np, pandas as pd
 from scipy.stats import linregress
 from datetime import datetime, timezone
 import matplotlib
@@ -116,57 +116,6 @@ def parse_json_seguro(raw):
         except:
             pass
         return None
-
-# ========== NUEVA FUNCIÓN: REINTENTOS CON ESPERA INTELIGENTE ==========
-def gemini_generate_with_retry(model, contents, max_retries=5):
-    """
-    Llama a model.generate_content con reintentos automáticos ante error 429.
-    Respeta el retry_delay devuelto por la API si está disponible.
-    """
-    global TOKENS_ACUMULADOS
-    delay = 1  # segundos iniciales si no hay información
-
-    for intento in range(max_retries):
-        try:
-            response = model.generate_content(contents)
-            # Estimar tokens solo si tuvo éxito
-            try:
-                raw_text = response.text
-                # Si contents es una lista, tomamos el primer elemento como prompt (aproximado)
-                if isinstance(contents, list) and len(contents) > 0:
-                    prompt_text = str(contents[0])
-                else:
-                    prompt_text = str(contents)
-                TOKENS_ACUMULADOS += len(raw_text.split()) + len(prompt_text.split()) + 1000
-            except:
-                pass
-            return response
-
-        except Exception as e:
-            error_msg = str(e)
-            # Verificar si es error 429 (quota exceeded)
-            if "429" in error_msg or "quota" in error_msg.lower():
-                wait_seconds = None
-                # Buscar patrón: retry_delay { seconds: 53 }
-                match = re.search(r'retry_delay\s*\{\s*seconds:\s*(\d+)\s*\}', error_msg)
-                if match:
-                    wait_seconds = int(match.group(1))
-                else:
-                    # Fallback: espera exponencial
-                    wait_seconds = delay
-                    delay = min(delay * 2, 60)  # máximo 60s
-
-                print(f"⚠️ Cuota excedida (429). Esperando {wait_seconds}s antes de reintentar (intento {intento+1}/{max_retries})")
-                time.sleep(wait_seconds)
-            else:
-                # Otros errores no reintentables
-                print(f"❌ Error en Gemini (no reintentable): {e}")
-                raise e
-
-    # Si se agotan los reintentos
-    print("❌ Máximo de reintentos alcanzado para Gemini. Devolviendo error.")
-    raise Exception("429: Quota exceeded after retries")
-# ===================================================================
 
 # =================== CONFIGURACIÓN ===================
 SYMBOL = "BTCUSDT"
@@ -464,10 +413,10 @@ Aquí están los datos numéricos (sin interpretación):
 ATR: {atr:.2f}. Toma tu decisión basándote tanto en los números como en la imagen del gráfico.
 """
         model = genai.GenerativeModel(MODELO_VISION)
-        # USAR LA NUEVA FUNCIÓN CON REINTENTOS
-        response = gemini_generate_with_retry(model, [prompt, imagen])
+        response = model.generate_content([prompt, imagen])
         raw = response.text
-        # Los tokens ya se actualizan dentro de gemini_generate_with_retry
+        TOKENS_ACUMULADOS += len(raw.split()) + len(prompt.split()) + 1000
+        print(f"📊 Tokens estimados acumulados: {TOKENS_ACUMULADOS}")
 
         if not raw or raw.strip() == "":
             print("⚠️ Respuesta vacía -> Hold")
@@ -512,11 +461,9 @@ Responde ÚNICAMENTE con un JSON en una línea:
     user_msg = f"Winrate: {winrate*100:.0f}% ({wins}W, {10-wins}L).\n\nHistorial:\n{resumen}\n\nDicta la nueva regla."
     try:
         model = genai.GenerativeModel(MODELO_VISION)
-        # USAR LA NUEVA FUNCIÓN CON REINTENTOS
-        response = gemini_generate_with_retry(model, system_msg + "\n" + user_msg)
+        response = model.generate_content(system_msg + "\n" + user_msg)
         raw = response.text
-        # Tokens ya actualizados dentro de gemini_generate_with_retry
-
+        TOKENS_ACUMULADOS += len(raw.split()) + 500
         datos = parse_json_seguro(raw)
         if datos:
             REGLAS_APRENDIDAS = datos.get("nueva_regla", REGLAS_APRENDIDAS)
