@@ -1,4 +1,4 @@
-# BOT TRADING V99.38 – GEMINI 2.5 FLASH (MULTI-TRADES + BARRIDOS + VISIÓN) - MODELO GEMINI 2.5 FLASH CON RAZONAMIENTO HOLÍSTICO
+# BOT TRADING V99.38 – DEEPSEEK-V4-PRO (MULTI-TRADES + BARRIDOS + VISIÓN) - MODELO DEEPSEEK-V4-PRO CON RAZONAMIENTO HOLÍSTICO
 # ==============================================================================
 import os, time, requests, json, re, numpy as np, pandas as pd
 from scipy.stats import linregress
@@ -6,17 +6,22 @@ from datetime import datetime, timezone
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import google.generativeai as genai
 from PIL import Image
 import io
 import json_repair
+import base64
+from openai import OpenAI
 
-# Configuración de Gemini
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-if not GOOGLE_API_KEY:
-    raise ValueError("Falta GOOGLE_API_KEY")
-genai.configure(api_key=GOOGLE_API_KEY)
-MODELO_VISION = "gemini-2.5-flash"   # Modelo multimodal que acepta imágenes
+# =================== CONFIGURACIÓN DE DEEPSEEK ===================
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+if not DEEPSEEK_API_KEY:
+    raise ValueError("Falta DEEPSEEK_API_KEY")
+# Cliente compatible con OpenAI pero apuntando a DeepSeek
+client = OpenAI(
+    api_key=DEEPSEEK_API_KEY,
+    base_url="https://api.deepseek.com",
+)
+MODELO_VISION = "deepseek-v4-pro"   # Modelo multimodal que acepta imágenes (también puede ser "deepseek-v4-flash")
 
 # ====== MEMORIA (con corrección de serialización) ======
 MEMORY_FILE = "memoria_bot.json"
@@ -279,7 +284,7 @@ def generar_descripcion_nison(df, idx=-2):
     """
     Versión NEUTRAL: solo entrega datos crudos, sin interpretar barridos,
     roles de EMA, ni conclusiones de soporte/resistencia.
-    Gemini tomará sus propias decisiones basándose en la imagen + estos números.
+    DeepSeek tomará sus propias decisiones basándose en la imagen + estos números.
     """
     if df.empty or len(df) < abs(idx)+1:
         return "Datos insuficientes", 0
@@ -345,7 +350,7 @@ Posición relativa respecto a EMA20:
 """
     return descripcion, atr
 
-# =================== GRÁFICO PARA GEMINI ===================
+# =================== GRÁFICO PARA DEEPSEEK ===================
 def generar_grafico_para_vision(df, soporte, resistencia, slope, intercept, ultimo_precio=None):
     """Genera un gráfico de velas y lo devuelve como objeto PIL Image."""
     if df.empty:
@@ -377,8 +382,15 @@ def generar_grafico_para_vision(df, soporte, resistencia, slope, intercept, ulti
     plt.close()
     return img
 
-# =================== IA GEMINI 2.5 FLASH (VISIÓN + TEXTO) ===================
-def analizar_con_gemini(descripcion_texto, atr, reglas_aprendidas, imagen):
+def pil_to_base64(img):
+    """Convierte una imagen PIL a string base64 en formato data:image/png;base64,..."""
+    buffered = io.BytesIO()
+    img.save(buffered, format="PNG")
+    img_base64 = base64.b64encode(buffered.getvalue()).decode()
+    return f"data:image/png;base64,{img_base64}"
+
+# =================== IA DEEPSEEK-V4-PRO (VISIÓN + TEXTO) ===================
+def analizar_con_deepseek(descripcion_texto, atr, reglas_aprendidas, imagen):
     global TOKENS_ACUMULADOS
     try:
         prompt = f"""
@@ -412,11 +424,34 @@ Aquí están los datos numéricos (sin interpretación):
 
 ATR: {atr:.2f}. Toma tu decisión basándote tanto en los números como en la imagen del gráfico.
 """
-        model = genai.GenerativeModel(MODELO_VISION)
-        response = model.generate_content([prompt, imagen])
-        raw = response.text
-        TOKENS_ACUMULADOS += len(raw.split()) + len(prompt.split()) + 1000
-        print(f"📊 Tokens estimados acumulados: {TOKENS_ACUMULADOS}")
+        # Convertir imagen a base64
+        img_base64 = pil_to_base64(imagen)
+        # Llamada a DeepSeek V4-Pro (multimodal)
+        response = client.chat.completions.create(
+            model=MODELO_VISION,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": img_base64}
+                        }
+                    ]
+                }
+            ],
+            temperature=0.2,
+            max_tokens=2000
+        )
+        raw = response.choices[0].message.content
+        # Contabilizar tokens reales (DeepSeek devuelve usage)
+        if hasattr(response, 'usage') and response.usage:
+            TOKENS_ACUMULADOS += response.usage.total_tokens
+        else:
+            # Estimación aproximada si no viene usage
+            TOKENS_ACUMULADOS += len(raw.split()) + len(prompt.split()) + 1000
+        print(f"📊 Tokens acumulados: {TOKENS_ACUMULADOS}")
 
         if not raw or raw.strip() == "":
             print("⚠️ Respuesta vacía -> Hold")
@@ -435,7 +470,7 @@ ATR: {atr:.2f}. Toma tu decisión basándote tanto en los números como en la im
         return decision, datos.get("razones", []), datos.get("patron", ""), (sl_m, tp_m, tr_m)
 
     except Exception as e:
-        print(f"❌ Error Gemini: {e} -> Hold")
+        print(f"❌ Error DeepSeek: {e} -> Hold")
         return "Hold", [f"Error: {e}"], "", (DEFAULT_SL_MULT, DEFAULT_TP1_MULT, DEFAULT_TRAILING_MULT)
 
 # =================== AUTOAPRENDIZAJE (cada 10 trades) ===================
@@ -460,10 +495,20 @@ Responde ÚNICAMENTE con un JSON en una línea:
 """
     user_msg = f"Winrate: {winrate*100:.0f}% ({wins}W, {10-wins}L).\n\nHistorial:\n{resumen}\n\nDicta la nueva regla."
     try:
-        model = genai.GenerativeModel(MODELO_VISION)
-        response = model.generate_content(system_msg + "\n" + user_msg)
-        raw = response.text
-        TOKENS_ACUMULADOS += len(raw.split()) + 500
+        response = client.chat.completions.create(
+            model=MODELO_VISION,  # o "deepseek-v4-flash" para ahorrar tokens
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg}
+            ],
+            temperature=0.3,
+            max_tokens=1000
+        )
+        raw = response.choices[0].message.content
+        if hasattr(response, 'usage') and response.usage:
+            TOKENS_ACUMULADOS += response.usage.total_tokens
+        else:
+            TOKENS_ACUMULADOS += len(raw.split()) + 500
         datos = parse_json_seguro(raw)
         if datos:
             REGLAS_APRENDIDAS = datos.get("nueva_regla", REGLAS_APRENDIDAS)
@@ -635,7 +680,7 @@ def paper_revisar_sl_tp(df, sop, res, slo, inter):
 def run_bot():
     global ULTIMA_DECISION, ULTIMO_MOTIVO, TOKENS_ACUMULADOS
     cargar_memoria()
-    print(f"🤖 BOT V99.38 INICIADO - Modelo {MODELO_VISION} con razonamiento holístico y visión")
+    print(f"🤖 BOT V99.38 INICIADO - Modelo {MODELO_VISION} con razonamiento holístico y visión (DeepSeek)")
     telegram_mensaje(f"🤖 BOT V99.38 INICIADO - Modelo {MODELO_VISION}\nSistema Multi-Trades con análisis visual de gráficos, confluencias, barridos y patrones.")
     ultima_vela = None
     while True:
@@ -664,14 +709,14 @@ def run_bot():
                     ultima_vela = vela_cerrada
                     time.sleep(SLEEP_SECONDS)
                     continue
-                print(f"--- Evaluando {vela_cerrada.strftime('%H:%M')} con Gemini 2.5 Flash (imagen + texto) ---")
+                print(f"--- Evaluando {vela_cerrada.strftime('%H:%M')} con DeepSeek-V4-Pro (imagen + texto) ---")
                 img = generar_grafico_para_vision(df, sop, res, slo, inter, precio)
                 if img is None:
                     print("⚠️ No se pudo generar imagen, se omite ciclo.")
                     ultima_vela = vela_cerrada
                     time.sleep(SLEEP_SECONDS)
                     continue
-                decision, razones, patron, multis = analizar_con_gemini(desc, atr_val, REGLAS_APRENDIDAS, img)
+                decision, razones, patron, multis = analizar_con_deepseek(desc, atr_val, REGLAS_APRENDIDAS, img)
                 ULTIMA_DECISION, ULTIMO_MOTIVO = decision, razones[0] if razones else ""
                 if decision in ["Buy","Sell"] and risk_management_check():
                     paper_abrir_posicion(decision, precio, atr_val, razones, patron, multis, df, sop, res, slo, inter)
