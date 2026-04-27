@@ -1,4 +1,4 @@
-# BOT TRADING V99.38 – DEEPSEEK-V4-FLASH vía SiliconFlow (MULTI-TRADES + VISIÓN)
+# BOT TRADING V99.38 – QWEN3-VL-32B-INSTRUCT vía SiliconFlow (MULTI-TRADES + VISIÓN)
 # ==============================================================================
 import os, time, requests, json, numpy as np, pandas as pd
 from scipy.stats import linregress
@@ -17,7 +17,7 @@ SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY")
 if not SILICONFLOW_API_KEY:
     raise ValueError("Falta SILICONFLOW_API_KEY. Obtén una en https://cloud.siliconflow.com")
 
-# ✅ URL base CORRECTA (según documentación oficial)
+# ✅ URL base CORRECTA (según documentación oficial de SiliconFlow)
 SILICONFLOW_BASE_URL = "https://api.siliconflow.com/v1"
 
 # Cliente OpenAI compatible con SiliconFlow
@@ -26,8 +26,8 @@ client = OpenAI(
     base_url=SILICONFLOW_BASE_URL,
 )
 
-# Modelo multimodal de DeepSeek (soporta imágenes)
-MODELO_VISION = "deepseek-ai/DeepSeek-V4-Flash"
+# ✅ Modelo multimodal: Qwen3-VL-32B-Instruct
+MODELO_VISION = "Qwen/Qwen3-VL-32B-Instruct"
 
 # ====== MEMORIA (con corrección de serialización) ======
 MEMORY_FILE = "memoria_bot.json"
@@ -382,11 +382,11 @@ def pil_to_base64(img):
     img_base64 = base64.b64encode(buffered.getvalue()).decode()
     return f"data:image/png;base64,{img_base64}"
 
-# =================== IA DEEPSEEK-V4-FLASH (VISIÓN + TEXTO) vía SiliconFlow ===================
-def analizar_con_siliconflow(descripcion_texto, atr, reglas_aprendidas, imagen):
+# =================== IA QWEN3-VL-32B-INSTRUCT (VISIÓN + TEXTO) ===================
+def analizar_con_qwen(descripcion_texto, atr, reglas_aprendidas, imagen):
     global TOKENS_ACUMULADOS
     try:
-        # Comprimir imagen (opcional, pero recomendado)
+        # Comprimir imagen para evitar límites (opcional pero recomendado)
         imagen.thumbnail((1200, 800), Image.Resampling.LANCZOS)
         img_base64 = pil_to_base64(imagen)
 
@@ -459,7 +459,7 @@ ATR: {atr:.2f}. Toma tu decisión basándote tanto en los números como en la im
         return decision, datos.get("razones", []), datos.get("patron", ""), (sl_m, tp_m, tr_m)
 
     except Exception as e:
-        print(f"❌ Error DeepSeek-V4-Flash: {e} -> Hold")
+        print(f"❌ Error Qwen3-VL-32B-Instruct: {e} -> Hold")
         return "Hold", [f"Error: {e}"], "", (DEFAULT_SL_MULT, DEFAULT_TP1_MULT, DEFAULT_TRAILING_MULT)
 
 # =================== AUTOAPRENDIZAJE (cada 10 trades) ===================
@@ -698,14 +698,14 @@ def run_bot():
                     ultima_vela = vela_cerrada
                     time.sleep(SLEEP_SECONDS)
                     continue
-                print(f"--- Evaluando {vela_cerrada.strftime('%H:%M')} con DeepSeek-V4-Flash (imagen + texto) ---")
+                print(f"--- Evaluando {vela_cerrada.strftime('%H:%M')} con Qwen3-VL-32B-Instruct (imagen + texto) ---")
                 img = generar_grafico_para_vision(df, sop, res, slo, inter, precio)
                 if img is None:
                     print("⚠️ No se pudo generar imagen, se omite ciclo.")
                     ultima_vela = vela_cerrada
                     time.sleep(SLEEP_SECONDS)
                     continue
-                decision, razones, patron, multis = analizar_con_siliconflow(desc, atr_val, REGLAS_APRENDIDAS, img)
+                decision, razones, patron, multis = analizar_con_qwen(desc, atr_val, REGLAS_APRENDIDAS, img)
                 ULTIMA_DECISION, ULTIMO_MOTIVO = decision, razones[0] if razones else ""
                 if decision in ["Buy","Sell"] and risk_management_check():
                     paper_abrir_posicion(decision, precio, atr_val, razones, patron, multis, df, sop, res, slo, inter)
