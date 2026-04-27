@@ -1,4 +1,4 @@
-# BOT TRADING V99.38 – DEEPSEEK-V4-PRO (MULTI-TRADES + BARRIDOS + VISIÓN) - MODELO DEEPSEEK-V4-PRO CON RAZONAMIENTO HOLÍSTICO
+# BOT TRADING V99.38 – DEEPSEEK-V4-FLASH (MULTI-TRADES + BARRIDOS + VISIÓN) - MODELO DEEPSEEK-V4-FLASH CON RAZONAMIENTO HOLÍSTICO
 # ==============================================================================
 import os, time, requests, json, re, numpy as np, pandas as pd
 from scipy.stats import linregress
@@ -12,16 +12,20 @@ import json_repair
 import base64
 from openai import OpenAI
 
-# =================== CONFIGURACIÓN DE DEEPSEEK ===================
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-if not DEEPSEEK_API_KEY:
-    raise ValueError("Falta DEEPSEEK_API_KEY")
-# Cliente compatible con OpenAI pero apuntando a DeepSeek
+# =================== CONFIGURACIÓN DE DEEPSEEK-V4-FLASH (vía SiliconFlow) ===================
+SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY")
+if not SILICONFLOW_API_KEY:
+    raise ValueError("Falta SILICONFLOW_API_KEY. Obtén una en https://siliconflow.cn")
+SILICONFLOW_BASE_URL = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
+
+# Cliente compatible con OpenAI
 client = OpenAI(
-    api_key=DEEPSEEK_API_KEY,
-    base_url="https://api.deepseek.com",
+    api_key=SILICONFLOW_API_KEY,
+    base_url=SILICONFLOW_BASE_URL,
 )
-MODELO_VISION = "deepseek-v4-pro"   # Modelo multimodal que acepta imágenes (también puede ser "deepseek-v4-flash")
+
+# Modelo DeepSeek-V4-Flash (multimodal)
+MODELO_VISION = "deepseek-ai/DeepSeek-V4-Flash"
 
 # ====== MEMORIA (con corrección de serialización) ======
 MEMORY_FILE = "memoria_bot.json"
@@ -122,7 +126,7 @@ def parse_json_seguro(raw):
             pass
         return None
 
-# =================== CONFIGURACIÓN ===================
+# =================== CONFIGURACIÓN DEL BOT ===================
 SYMBOL = "BTCUSDT"
 INTERVAL = "5"
 RISK_PER_TRADE = 0.02
@@ -159,9 +163,9 @@ REGLAS_APRENDIDAS = "Aún no hay trades. Busca confluencia entre tendencia, patr
 ULTIMA_DECISION = "Hold"
 ULTIMA_MOTIVO = "Esperando señal"
 
-TOKENS_ACUMULADOS = 0  # estimación aproximada
+TOKENS_ACUMULADOS = 0
 
-# =================== COMUNICACIÓN ===================
+# =================== COMUNICACIÓN TELEGRAM ===================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 BASE_URL = "https://api.bybit.com"
@@ -182,7 +186,6 @@ def telegram_enviar_imagen(ruta_imagen, caption=""):
         print(f"Error imagen: {e}")
 
 def reporte_estado():
-    """Envía un reporte completo del estado actual a Telegram."""
     pnl_global = PAPER_BALANCE - PAPER_BALANCE_INICIAL
     winrate = (PAPER_WIN / PAPER_TRADES_TOTALES * 100) if PAPER_TRADES_TOTALES > 0 else 0
     activos = len(PAPER_ACTIVE_TRADES)
@@ -194,7 +197,7 @@ def reporte_estado():
         f"🔄 Trades cerrados: {PAPER_TRADES_TOTALES}\n"
         f"⚡ Activos: {activos}/{MAX_CONCURRENT_TRADES}\n"
         f"🧠 Modelo: {MODELO_VISION}\n"
-        f"🔢 Tokens estimados: {TOKENS_ACUMULADOS}"
+        f"🔢 Tokens consumidos: {TOKENS_ACUMULADOS}"
     )
     telegram_mensaje(mensaje)
 
@@ -281,11 +284,6 @@ def analizar_patrones_conjuntos(df, idx):
     return " | ".join(patrones) if patrones else "Consolidación normal"
 
 def generar_descripcion_nison(df, idx=-2):
-    """
-    Versión NEUTRAL: solo entrega datos crudos, sin interpretar barridos,
-    roles de EMA, ni conclusiones de soporte/resistencia.
-    DeepSeek tomará sus propias decisiones basándose en la imagen + estos números.
-    """
     if df.empty or len(df) < abs(idx)+1:
         return "Datos insuficientes", 0
 
@@ -296,15 +294,12 @@ def generar_descripcion_nison(df, idx=-2):
 
     soporte, resistencia, slope, intercept, tendencia, micro = detectar_zonas_mercado(df, idx)
 
-    # Anatomía de las últimas 3 velas
     anat_v1 = analizar_anatomia_vela(df.iloc[idx-2]) if idx-2 >= 0 else "N/A"
     anat_v2 = analizar_anatomia_vela(df.iloc[idx-1]) if idx-1 >= 0 else "N/A"
     anat_v3 = analizar_anatomia_vela(df.iloc[idx]) if idx >= 0 else "N/A"
 
-    # Patrones clásicos (sin forzar barridos)
     patrones_generales = analizar_patrones_conjuntos(df, idx)
 
-    # Clusters de mechas (solo conteo, sin interpretación)
     df_mechas = df.iloc[max(0, idx-7):idx+1] if idx >= 7 else df.iloc[:idx+1]
     if len(df_mechas) >= 3:
         rangos = df_mechas['high'] - df_mechas['low']
@@ -314,7 +309,6 @@ def generar_descripcion_nison(df, idx=-2):
     else:
         cluster_txt = "Datos insuficientes para clusters."
 
-    # Porcentaje de velas sobre EMA20 (sin decir si es soporte o resistencia)
     ultimas_10 = df.iloc[max(0, idx-9):idx+1] if idx >= 9 else df.iloc[:idx+1]
     if len(ultimas_10) >= 5:
         sobre_ema = (ultimas_10['close'] > ultimas_10['ema20']).sum()
@@ -352,7 +346,6 @@ Posición relativa respecto a EMA20:
 
 # =================== GRÁFICO PARA DEEPSEEK ===================
 def generar_grafico_para_vision(df, soporte, resistencia, slope, intercept, ultimo_precio=None):
-    """Genera un gráfico de velas y lo devuelve como objeto PIL Image."""
     if df.empty:
         return None
     df_plot = df.tail(GRAFICO_VELAS_LIMIT).copy()
@@ -374,7 +367,6 @@ def generar_grafico_para_vision(df, soporte, resistencia, slope, intercept, ulti
     ax.grid(True, alpha=0.1)
     ax.legend(loc='lower right', facecolor='black', labelcolor='white')
     plt.tight_layout()
-    # Convertir a imagen PIL
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=100)
     buf.seek(0)
@@ -383,16 +375,19 @@ def generar_grafico_para_vision(df, soporte, resistencia, slope, intercept, ulti
     return img
 
 def pil_to_base64(img):
-    """Convierte una imagen PIL a string base64 en formato data:image/png;base64,..."""
     buffered = io.BytesIO()
     img.save(buffered, format="PNG")
     img_base64 = base64.b64encode(buffered.getvalue()).decode()
     return f"data:image/png;base64,{img_base64}"
 
-# =================== IA DEEPSEEK-V4-PRO (VISIÓN + TEXTO) ===================
+# =================== IA DEEPSEEK-V4-FLASH (VISIÓN + TEXTO) ===================
 def analizar_con_deepseek(descripcion_texto, atr, reglas_aprendidas, imagen):
     global TOKENS_ACUMULADOS
     try:
+        # Comprimir imagen para evitar sobrepasar límites
+        imagen.thumbnail((1200, 800), Image.Resampling.LANCZOS)
+        img_base64 = pil_to_base64(imagen)
+
         prompt = f"""
 Eres un Maestro del Price Action. Lees los DATOS NUMÉRICOS (texto) y observas el GRÁFICO DE VELAS (imagen) de forma holística.
 Los niveles (soportes, resistencias, EMA20) son relativos, no líneas exactas. El mercado puede perforarlos ligeramente para cazar liquidez y luego revertir.
@@ -424,9 +419,7 @@ Aquí están los datos numéricos (sin interpretación):
 
 ATR: {atr:.2f}. Toma tu decisión basándote tanto en los números como en la imagen del gráfico.
 """
-        # Convertir imagen a base64
-        img_base64 = pil_to_base64(imagen)
-        # Llamada a DeepSeek V4-Pro (multimodal)
+
         response = client.chat.completions.create(
             model=MODELO_VISION,
             messages=[
@@ -434,10 +427,7 @@ ATR: {atr:.2f}. Toma tu decisión basándote tanto en los números como en la im
                     "role": "user",
                     "content": [
                         {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": img_base64}
-                        }
+                        {"type": "image_url", "image_url": {"url": img_base64}}
                     ]
                 }
             ],
@@ -445,11 +435,10 @@ ATR: {atr:.2f}. Toma tu decisión basándote tanto en los números como en la im
             max_tokens=2000
         )
         raw = response.choices[0].message.content
-        # Contabilizar tokens reales (DeepSeek devuelve usage)
-        if hasattr(response, 'usage') and response.usage:
+        # Consumo de tokens reales
+        if response.usage:
             TOKENS_ACUMULADOS += response.usage.total_tokens
         else:
-            # Estimación aproximada si no viene usage
             TOKENS_ACUMULADOS += len(raw.split()) + len(prompt.split()) + 1000
         print(f"📊 Tokens acumulados: {TOKENS_ACUMULADOS}")
 
@@ -470,7 +459,7 @@ ATR: {atr:.2f}. Toma tu decisión basándote tanto en los números como en la im
         return decision, datos.get("razones", []), datos.get("patron", ""), (sl_m, tp_m, tr_m)
 
     except Exception as e:
-        print(f"❌ Error DeepSeek: {e} -> Hold")
+        print(f"❌ Error DeepSeek-V4-Flash: {e} -> Hold")
         return "Hold", [f"Error: {e}"], "", (DEFAULT_SL_MULT, DEFAULT_TP1_MULT, DEFAULT_TRAILING_MULT)
 
 # =================== AUTOAPRENDIZAJE (cada 10 trades) ===================
@@ -496,7 +485,7 @@ Responde ÚNICAMENTE con un JSON en una línea:
     user_msg = f"Winrate: {winrate*100:.0f}% ({wins}W, {10-wins}L).\n\nHistorial:\n{resumen}\n\nDicta la nueva regla."
     try:
         response = client.chat.completions.create(
-            model=MODELO_VISION,  # o "deepseek-v4-flash" para ahorrar tokens
+            model=MODELO_VISION,
             messages=[
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_msg}
@@ -505,7 +494,7 @@ Responde ÚNICAMENTE con un JSON en una línea:
             max_tokens=1000
         )
         raw = response.choices[0].message.content
-        if hasattr(response, 'usage') and response.usage:
+        if response.usage:
             TOKENS_ACUMULADOS += response.usage.total_tokens
         else:
             TOKENS_ACUMULADOS += len(raw.split()) + 500
@@ -680,7 +669,7 @@ def paper_revisar_sl_tp(df, sop, res, slo, inter):
 def run_bot():
     global ULTIMA_DECISION, ULTIMO_MOTIVO, TOKENS_ACUMULADOS
     cargar_memoria()
-    print(f"🤖 BOT V99.38 INICIADO - Modelo {MODELO_VISION} con razonamiento holístico y visión (DeepSeek)")
+    print(f"🤖 BOT V99.38 INICIADO - Modelo {MODELO_VISION} con razonamiento holístico y visión (DeepSeek-V4-Flash)")
     telegram_mensaje(f"🤖 BOT V99.38 INICIADO - Modelo {MODELO_VISION}\nSistema Multi-Trades con análisis visual de gráficos, confluencias, barridos y patrones.")
     ultima_vela = None
     while True:
@@ -700,7 +689,7 @@ def run_bot():
             pnl_global = PAPER_BALANCE - PAPER_BALANCE_INICIAL
             winrate = (PAPER_WIN/PAPER_TRADES_TOTALES*100) if PAPER_TRADES_TOTALES>0 else 0
             activos = len(PAPER_ACTIVE_TRADES)
-            print(f"\n💓 Heartbeat | P:{precio:.2f} | ATR:{atr:.2f} | Activos:{activos}/{MAX_CONCURRENT_TRADES} | Cerrados:{PAPER_TRADES_TOTALES} | PnL:{pnl_global:+.2f} | WR:{winrate:.1f}% | Tokens est.:{TOKENS_ACUMULADOS}")
+            print(f"\n💓 Heartbeat | P:{precio:.2f} | ATR:{atr:.2f} | Activos:{activos}/{MAX_CONCURRENT_TRADES} | Cerrados:{PAPER_TRADES_TOTALES} | PnL:{pnl_global:+.2f} | WR:{winrate:.1f}% | Tokens: {TOKENS_ACUMULADOS}")
             
             if activos < MAX_CONCURRENT_TRADES and ultima_vela != vela_cerrada:
                 desc, atr_val = generar_descripcion_nison(df)
@@ -709,7 +698,7 @@ def run_bot():
                     ultima_vela = vela_cerrada
                     time.sleep(SLEEP_SECONDS)
                     continue
-                print(f"--- Evaluando {vela_cerrada.strftime('%H:%M')} con DeepSeek-V4-Pro (imagen + texto) ---")
+                print(f"--- Evaluando {vela_cerrada.strftime('%H:%M')} con DeepSeek-V4-Flash (imagen + texto) ---")
                 img = generar_grafico_para_vision(df, sop, res, slo, inter, precio)
                 if img is None:
                     print("⚠️ No se pudo generar imagen, se omite ciclo.")
