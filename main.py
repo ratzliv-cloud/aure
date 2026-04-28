@@ -1,4 +1,4 @@
-# BOT TRADING V99.38 – QWEN3-VL-32B-INSTRUCT vía SiliconFlow (MULTI-TRADES + VISIÓN)
+# BOT TRADING V99.39 – QWEN3-VL-32B-INSTRUCT vía SiliconFlow (MULTI-TRADES + VISIÓN + MEMORIA DINÁMICA)
 # ==============================================================================
 import os, time, requests, json, numpy as np, pandas as pd
 from scipy.stats import linregress
@@ -17,19 +17,11 @@ SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY")
 if not SILICONFLOW_API_KEY:
     raise ValueError("Falta SILICONFLOW_API_KEY. Obtén una en https://cloud.siliconflow.com")
 
-# ✅ URL base CORRECTA (según documentación oficial de SiliconFlow)
 SILICONFLOW_BASE_URL = "https://api.siliconflow.com/v1"
-
-# Cliente OpenAI compatible con SiliconFlow
-client = OpenAI(
-    api_key=SILICONFLOW_API_KEY,
-    base_url=SILICONFLOW_BASE_URL,
-)
-
-# ✅ Modelo multimodal: Qwen3-VL-32B-Instruct
+client = OpenAI(api_key=SILICONFLOW_API_KEY, base_url=SILICONFLOW_BASE_URL)
 MODELO_VISION = "Qwen/Qwen3-VL-32B-Instruct"
 
-# ====== MEMORIA (con corrección de serialización) ======
+# ====== MEMORIA ======
 MEMORY_FILE = "memoria_bot.json"
 
 def convertir_serializable(obj):
@@ -105,12 +97,10 @@ def parse_json_seguro(raw):
         repaired = json_repair.repair_json(raw)
         return json.loads(repaired)
     except:
-        # fallback manual
         try:
             stack = []
             start = raw.find('{')
-            if start == -1:
-                return None
+            if start == -1: return None
             end = start
             for i, ch in enumerate(raw[start:], start):
                 if ch == '{':
@@ -160,11 +150,10 @@ ADAPTIVE_SL_MULT = DEFAULT_SL_MULT
 ADAPTIVE_TP1_MULT = DEFAULT_TP1_MULT
 ADAPTIVE_TRAILING_MULT = DEFAULT_TRAILING_MULT
 ULTIMO_APRENDIZAJE = 0
-REGLAS_APRENDIDAS = "Aún no hay trades. Busca confluencia entre tendencia, patrones y barridos."
+REGLAS_APRENDIDAS = "Aún no hay trades. Busca confluencia entre patrones de velas, tendencia y barridos de liquidez."
 
 ULTIMA_DECISION = "Hold"
 ULTIMA_MOTIVO = "Esperando señal"
-
 TOKENS_ACUMULADOS = 0
 
 # =================== COMUNICACIÓN TELEGRAM ===================
@@ -251,7 +240,7 @@ def detectar_zonas_mercado(df, idx=-2, ventana_macro=120):
     tendencia = 'ALCISTA' if slope > 0.01 else 'BAJISTA' if slope < -0.01 else 'LATERAL'
     return soporte, resistencia, slope, intercept, tendencia, micro_tendencia
 
-# =================== MOTOR HOLÍSTICO (VERSIÓN NEUTRAL) ===================
+# =================== MOTOR HOLÍSTICO (VERSIÓN NEUTRAL MEJORADA) ===================
 def analizar_anatomia_vela(v):
     rango = v['high'] - v['low']
     if rango == 0: return "Doji Plano (0%)"
@@ -382,62 +371,56 @@ def pil_to_base64(img):
     img_base64 = base64.b64encode(buffered.getvalue()).decode()
     return f"data:image/png;base64,{img_base64}"
 
-# =================== IA QWEN3-VL-32B-INSTRUCT (VISIÓN + TEXTO) ===================
+# =================== IA QWEN3-VL-32B-INSTRUCT (VISIÓN + TEXTO) MEJORADA ===================
 def analizar_con_qwen(descripcion_texto, atr, reglas_aprendidas, imagen):
     global TOKENS_ACUMULADOS
     try:
-        # Comprimir imagen para evitar límites (opcional pero recomendado)
         imagen.thumbnail((1200, 800), Image.Resampling.LANCZOS)
         img_base64 = pil_to_base64(imagen)
 
         prompt = f"""
-Eres un Maestro del Price Action. Lees los DATOS NUMÉRICOS (texto) y observas el GRÁFICO DE VELAS (imagen) de forma holística.
-Los niveles (soportes, resistencias, EMA20) son relativos, no líneas exactas. El mercado puede perforarlos ligeramente para cazar liquidez y luego revertir.
-Tu tarea es interpretar visualmente el gráfico y usar los datos solo como referencia numérica.
+Eres un **Maestro del Price Action** con dominio absoluto de los principios de Steven Nison (velas japonesas) y la lectura holística del mercado.
 
-🔥 REGLA EVOLUTIVA DE TU MENTOR:
+Tu análisis debe integrar **TODOS** los siguientes elementos visuales y numéricos, sin priorizar unos sobre otros:
+
+1. **Patrones de velas individuales** (Doji, Martillo, Estrella Fugaz, Cuerpos sólidos, Mechas largas/cortas, etc.)
+2. **Patrones de múltiples velas** (Envolventes, Estrella Matutina/Vespertina, Tres Soldados Blancos, Tres Cuervos Negros, etc.)
+3. **Clusters de mechas** (rechazos repetidos en zonas clave)
+4. **Tendencia visual** (no solo la línea de regresión, sino la inclinación de máximos/mínimos)
+5. **Zonas de soporte/resistencia** (como zonas, no líneas exactas; los barridos de liquidez son comunes)
+6. **EMA20** como dinámica de soporte/resistencia
+7. **Volatilidad (ATR)** para ajustar los multiplicadores
+
+**Lección de la experiencia reciente (debes considerarla, pero no seguirla ciegamente si el gráfico muestra lo contrario):**
 "{reglas_aprendidas}"
 
-LÓGICA OPERATIVA:
-- Puedes operar Reversiones, Continuaciones, Rompimientos o Trampas de Liquidez en CUALQUIER zona si la suma del contexto lo apoya.
-- Evalúa la confluencia de todo: tendencia visual, patrones de velas, clusters de mechas, acción de la EMA.
-- Si el mercado está en rango estrecho (muchas velas laterales), espera una señal clara (barrido o patrón de reversal) antes de operar.
-- Ajusta los multiplicadores de SL, TP1 y trailing según la volatilidad (ATR) y la confianza de la señal.
+**Directrices operativas:**
+- Puedes tomar **Buy**, **Sell** o **Hold**.
+- Opera reversiones, continuaciones o trampas de liquidez **siempre que el contexto visual de velas lo respalde**.
+- Si el mercado está lateral (muchas velas pequeñas con mechas simétricas), espera una señal clara (patrón de reversal o barrido).
+- Los niveles exactos (soporte, resistencia, EMA) pueden ser perforados ligeramente para cazar liquidez; observa el **comportamiento de la vela** en esa zona.
+- Ajusta los multiplicadores de SL, TP1 y trailing según la confianza de la señal y la volatilidad (ATR).
 
-IMPORTANTE: Todos los strings en el JSON DEBEN ser de una sola línea (sin saltos de línea literales). Si necesitas un salto de línea, escríbelo como '\\n'.
+**Formato de respuesta JSON (una sola línea, sin saltos literales):**
+{{"decision":"Buy/Sell/Hold","patron":"Nombre del patrón principal","razones":["Razón1","Razón2"],"sl_mult":1.2,"tp1_mult":1.5,"trailing_mult":1.8}}
 
-Responde ÚNICAMENTE con un JSON válido en este formato:
-{{
-  "decision": "Buy/Sell/Hold",
-  "patron": "Ej: Falso Rompimiento en EMA20 + Martillo en Tendencia Alcista",
-  "razones": ["Razón de Estructura/Liquidez", "Razón de Velas Exactas"],
-  "sl_mult": 1.2,
-  "tp1_mult": 1.5,
-  "trailing_mult": 1.8
-}}
-
-Aquí están los datos numéricos (sin interpretación):
+Datos numéricos (solo referencia):
 {descripcion_texto}
-
-ATR: {atr:.2f}. Toma tu decisión basándote tanto en los números como en la imagen del gráfico.
+ATR: {atr:.2f}
 """
-
         response = client.chat.completions.create(
             model=MODELO_VISION,
             messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": img_base64}}
-                    ]
-                }
+                {"role": "system", "content": "Eres un trader profesional que analiza gráficos de velas con metodología de Steven Nison. Responde SOLO con JSON válido en una línea."},
+                {"role": "user", "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": img_base64}}
+                ]}
             ],
-            temperature=0.2,
+            temperature=0.1,
             max_tokens=2000
         )
         raw = response.choices[0].message.content
-        # Contar tokens reales (si la respuesta incluye usage)
         if hasattr(response, 'usage') and response.usage:
             TOKENS_ACUMULADOS += response.usage.total_tokens
         else:
@@ -455,20 +438,21 @@ ATR: {atr:.2f}. Toma tu decisión basándote tanto en los números como en la im
         sl_m = max(0.5, min(2.5, float(datos.get("sl_mult", 1.2))))
         tp_m = max(0.8, min(3.0, float(datos.get("tp1_mult", 1.5))))
         tr_m = max(1.0, min(3.0, float(datos.get("trailing_mult", 1.8))))
-
         return decision, datos.get("razones", []), datos.get("patron", ""), (sl_m, tp_m, tr_m)
 
     except Exception as e:
         print(f"❌ Error Qwen3-VL-32B-Instruct: {e} -> Hold")
         return "Hold", [f"Error: {e}"], "", (DEFAULT_SL_MULT, DEFAULT_TP1_MULT, DEFAULT_TRAILING_MULT)
 
-# =================== AUTOAPRENDIZAJE (cada 10 trades) ===================
+# =================== AUTOAPRENDIZAJE (cada 10 trades NUEVOS) ===================
 def aprender_de_trades():
     global ADAPTIVE_SL_MULT, ADAPTIVE_TP1_MULT, ADAPTIVE_TRAILING_MULT, ULTIMO_APRENDIZAJE, REGLAS_APRENDIDAS, TOKENS_ACUMULADOS
-    total = len(TRADE_HISTORY)
+    total = PAPER_TRADES_TOTALES
+    # Solo aprendemos cuando hay al menos 10 trades nuevos desde el último aprendizaje
     if total < 10 or (total - ULTIMO_APRENDIZAJE) < 10:
         return
     print("🧠 Iniciando autoaprendizaje...")
+    # Tomamos los últimos 10 trades cerrados
     ultimos = TRADE_HISTORY[-10:]
     wins = sum(1 for t in ultimos if t['resultado_win'])
     winrate = wins / 10.0
@@ -479,10 +463,11 @@ def aprender_de_trades():
 
     system_msg = """
 Eres el Mentor de Trading de una IA. Analiza los últimos 10 trades.
+Extrae una lección concreta para mejorar: ¿qué funcionó? ¿qué falló?
 Responde ÚNICAMENTE con un JSON en una línea:
-{"analisis":"explicación de aciertos y errores","nueva_regla":"instrucción de mejora","sl_mult_sugerido":1.5,"tp1_mult_sugerido":1.5,"trailing_mult_sugerido":1.8}
+{"analisis":"explicación breve","nueva_regla":"lección práctica para futuras decisiones","sl_mult_sugerido":1.5,"tp1_mult_sugerido":1.5,"trailing_mult_sugerido":1.8}
 """
-    user_msg = f"Winrate: {winrate*100:.0f}% ({wins}W, {10-wins}L).\n\nHistorial:\n{resumen}\n\nDicta la nueva regla."
+    user_msg = f"Winrate: {winrate*100:.0f}% ({wins}W, {10-wins}L).\n\nHistorial:\n{resumen}\n\nDicta la nueva lección."
     try:
         response = client.chat.completions.create(
             model=MODELO_VISION,
@@ -504,7 +489,7 @@ Responde ÚNICAMENTE con un JSON en una línea:
             ADAPTIVE_SL_MULT = max(0.5, min(2.5, float(datos.get("sl_mult_sugerido", ADAPTIVE_SL_MULT))))
             ADAPTIVE_TP1_MULT = max(0.8, min(3.0, float(datos.get("tp1_mult_sugerido", ADAPTIVE_TP1_MULT))))
             ADAPTIVE_TRAILING_MULT = max(1.0, min(3.0, float(datos.get("trailing_mult_sugerido", ADAPTIVE_TRAILING_MULT))))
-            msg = f"🧠 AUTOAPRENDIZAJE (10 trades)\n📊 Winrate: {winrate*100:.1f}% ({wins}W/{10-wins}L)\n📜 Nueva regla: \"{REGLAS_APRENDIDAS}\"\n⚙️ SL:{ADAPTIVE_SL_MULT:.2f} TP1:{ADAPTIVE_TP1_MULT:.2f} Trail:{ADAPTIVE_TRAILING_MULT:.2f}"
+            msg = f"🧠 AUTOAPRENDIZAJE (10 trades nuevos)\n📊 Winrate: {winrate*100:.1f}% ({wins}W/{10-wins}L)\n📜 Nueva lección: \"{REGLAS_APRENDIDAS}\"\n⚙️ SL:{ADAPTIVE_SL_MULT:.2f} TP1:{ADAPTIVE_TP1_MULT:.2f} Trail:{ADAPTIVE_TRAILING_MULT:.2f}"
             telegram_mensaje(msg)
             print(msg)
         ULTIMO_APRENDIZAJE = total
@@ -610,10 +595,12 @@ def paper_revisar_sl_tp(df, sop, res, slo, inter):
     for t_id, t in PAPER_ACTIVE_TRADES.items():
         cerrar = False
         motivo = ""
+        # Actualizar máximo/mínimo para trailing
         if t['decision'] == "Buy":
             t['max_precio'] = max(t['max_precio'], h)
         else:
             t['max_precio'] = min(t['max_precio'], l)
+        # Verificar TP1
         if not t['tp1_ejecutado']:
             if (t['decision'] == "Buy" and h >= t['tp1']) or (t['decision'] == "Sell" and l <= t['tp1']):
                 beneficio = abs(t['tp1'] - t['entrada']) * (t['size_btc'] * PORCENTAJE_CIERRE_TP1)
@@ -621,16 +608,28 @@ def paper_revisar_sl_tp(df, sop, res, slo, inter):
                 PAPER_BALANCE += beneficio
                 t['size_restante'] *= (1 - PORCENTAJE_CIERRE_TP1)
                 t['tp1_ejecutado'] = True
-                t['sl_actual'] = t['entrada']
-                telegram_mensaje(f"🎯 TP1 #{t_id}: +{beneficio:.2f} USD, SL a BE")
+                t['sl_actual'] = t['entrada']  # Breakeven
+                telegram_mensaje(f"🎯 TP1 #{t_id}: +{beneficio:.2f} USD, SL movido a breakeven ({t['entrada']:.2f})")
+        # Trailing stop después de TP1
         if t['tp1_ejecutado']:
-            n_sl = t['max_precio'] - (t['atr_entrada'] * t['trailing_mult']) if t['decision'] == "Buy" else t['max_precio'] + (t['atr_entrada'] * t['trailing_mult'])
-            if (t['decision'] == "Buy" and n_sl > t['sl_actual']) or (t['decision'] == "Sell" and n_sl < t['sl_actual']):
-                t['sl_actual'] = n_sl
+            nuevo_sl = t['max_precio'] - (t['atr_entrada'] * t['trailing_mult']) if t['decision'] == "Buy" else t['max_precio'] + (t['atr_entrada'] * t['trailing_mult'])
+            # Solo ajustamos si mejora el SL (más cerca del precio para compras, más lejos para ventas? realmente para compras, nuevo_sl debe ser mayor que sl_actual)
+            if t['decision'] == "Buy":
+                if nuevo_sl > t['sl_actual']:
+                    old = t['sl_actual']
+                    t['sl_actual'] = nuevo_sl
+                    telegram_mensaje(f"🔄 [#{t_id}] Trailing Stop ajustado a: {t['sl_actual']:.2f} (antes {old:.2f})")
+            else:  # Sell
+                if nuevo_sl < t['sl_actual']:
+                    old = t['sl_actual']
+                    t['sl_actual'] = nuevo_sl
+                    telegram_mensaje(f"🔄 [#{t_id}] Trailing Stop ajustado a: {t['sl_actual']:.2f} (antes {old:.2f})")
+            # Verificar si el SL fue tocado
             if (t['decision'] == "Buy" and l <= t['sl_actual']) or (t['decision'] == "Sell" and h >= t['sl_actual']):
                 cerrar = True
                 motivo = "Trailing Stop"
         else:
+            # Stop loss inicial
             if (t['decision'] == "Buy" and l <= t['sl_inicial']) or (t['decision'] == "Sell" and h >= t['sl_inicial']):
                 cerrar = True
                 motivo = "Stop Loss"
@@ -650,8 +649,10 @@ def paper_revisar_sl_tp(df, sop, res, slo, inter):
             trades_a_cerrar.append(t_id)
             TRADE_HISTORY.append({
                 "fecha": datetime.now(timezone.utc).isoformat(),
-                "decision": t['decision'], "patron": t['patron'],
-                "pnl": pnl_total, "resultado_win": win
+                "decision": t['decision'],
+                "patron": t['patron'],
+                "pnl": pnl_total,
+                "resultado_win": win
             })
             guardar_memoria()
             msg = f"📤 [{motivo}] #{t_id} {t['decision'].upper()} -> {t['sl_actual']:.2f} | PnL: {pnl_total:.2f} USD"
@@ -660,17 +661,19 @@ def paper_revisar_sl_tp(df, sop, res, slo, inter):
             ruta_img = generar_grafico(df, t, sop, res, slo, inter, "Salida")
             if ruta_img:
                 telegram_enviar_imagen(ruta_img, msg)
+    # Cerrar trades marcados
     for t_id in trades_a_cerrar:
         del PAPER_ACTIVE_TRADES[t_id]
-    if trades_a_cerrar and PAPER_TRADES_TOTALES % 10 == 0:
+    # Autoaprendizaje si hay al menos 10 trades nuevos desde la última vez
+    if PAPER_TRADES_TOTALES - ULTIMO_APRENDIZAJE >= 10:
         aprender_de_trades()
 
 # =================== LOOP PRINCIPAL ===================
 def run_bot():
     global ULTIMA_DECISION, ULTIMO_MOTIVO, TOKENS_ACUMULADOS
     cargar_memoria()
-    print(f"🤖 BOT V99.38 INICIADO - Modelo {MODELO_VISION} con SiliconFlow (multimodal)")
-    telegram_mensaje(f"🤖 BOT V99.38 INICIADO - Modelo {MODELO_VISION}\nSistema Multi-Trades con análisis visual de gráficos.")
+    print(f"🤖 BOT V99.39 INICIADO - Modelo {MODELO_VISION} con SiliconFlow (multimodal + memoria dinámica)")
+    telegram_mensaje(f"🤖 BOT V99.39 INICIADO - Modelo {MODELO_VISION}\nSistema Multi-Trades con análisis visual de gráficos y autoaprendizaje cada 10 trades.")
     ultima_vela = None
     while True:
         try:
