@@ -1,4 +1,4 @@
-# BOT TRADING V99.40 – QWEN3-VL-32B-Instruct vía SiliconFlow (MULTI-TRADES + VISIÓN + MEMORIA DINÁMICA + PF ADAPTIVE)
+# BOT TRADING V99.43 – QWEN3-VL-32B-Instruct (SL/TP visual + TP1/TP2 + trailing final)
 # ==============================================================================
 import os, time, requests, json, numpy as np, pandas as pd
 from scipy.stats import linregress
@@ -42,12 +42,12 @@ def convertir_serializable(obj):
 
 def guardar_memoria():
     global ULTIMO_APRENDIZAJE, TOKENS_ACUMULADOS
-    # Creamos una copia de PAPER_ACTIVE_TRADES sin los datos grandes para memoria
     active_trades_meta = {}
     for tid, t in PAPER_ACTIVE_TRADES.items():
         active_trades_meta[tid] = {
             "id": t["id"], "decision": t["decision"], "entrada": t["entrada"],
-            "patron": t.get("patron", ""), "tp1_ejecutado": t["tp1_ejecutado"]
+            "razon": t.get("razon", ""), "tp1_ejecutado": t["tp1_ejecutado"],
+            "tp2_ejecutado": t.get("tp2_ejecutado", False)
         }
     data = {
         "TRADE_HISTORY": TRADE_HISTORY,
@@ -140,7 +140,10 @@ MAX_CONCURRENT_TRADES = 3
 DEFAULT_SL_MULT = 1.2
 DEFAULT_TP1_MULT = 1.5
 DEFAULT_TRAILING_MULT = 1.8
-PORCENTAJE_CIERRE_TP1 = 0.5
+
+# Porcentajes de cierre en cada objetivo
+PCT_TP1 = 0.50   # 50% en primer objetivo
+PCT_TP2 = 0.30   # 30% en segundo objetivo (el resto 20% quedará para trailing)
 
 PAPER_BALANCE_INICIAL = 100.0
 PAPER_BALANCE = PAPER_BALANCE_INICIAL
@@ -252,7 +255,7 @@ def detectar_zonas_mercado(df, idx=-2, ventana_macro=120):
     tendencia = 'ALCISTA' if slope > 0.01 else 'BAJISTA' if slope < -0.01 else 'LATERAL'
     return soporte, resistencia, slope, intercept, tendencia, micro_tendencia
 
-# =================== MOTOR HOLÍSTICO (VERSIÓN NEUTRAL MEJORADA) ===================
+# =================== MOTOR HOLÍSTICO ===================
 def analizar_anatomia_vela(v):
     rango = v['high'] - v['low']
     if rango == 0: return "Doji Plano (0%)"
@@ -383,7 +386,7 @@ def pil_to_base64(img):
     img_base64 = base64.b64encode(buffered.getvalue()).decode()
     return f"data:image/png;base64,{img_base64}"
 
-# =================== IA QWEN3-VL-32B-INSTRUCT (VISIÓN + TEXTO) MEJORADA ===================
+# =================== IA QWEN3-VL-32B-INSTRUCT (VISIÓN + TEXTO) ===================
 def analizar_con_qwen(descripcion_texto, atr, reglas_aprendidas, imagen):
     global TOKENS_ACUMULADOS
     try:
@@ -391,43 +394,42 @@ def analizar_con_qwen(descripcion_texto, atr, reglas_aprendidas, imagen):
         img_base64 = pil_to_base64(imagen)
 
         prompt = f"""
-Eres un **Analista de Price Action** que sigue el método de Steven Nison y la escuela de "Market Structure".
+Eres un **Analista de Price Action** experto en estructura de mercado y velas japonesas.
 
-Antes de dar tu decisión, DEBES seguir este razonamiento en orden:
+Debes seguir este razonamiento en orden:
 
-1. **Tendencia global** (regresión de 120 velas) y micro tendencia (últimas 8 velas): ¿Es alcista, bajista o lateral?
+1. **Tendencia global** (regresión 120v) y micro tendencia (8v).
+2. **Posición respecto a EMA20** (soporte/resistencia dinámica).
+3. **Soportes/resistencias clave** (máximos/mínimos de 40 velas). ¿Hay rompimiento verdadero o falso?
+4. **Anatomía de las últimas 3 velas** (cuerpo, mechas). ¿Martillo, estrella fugaz, doji, vela sólida?
+5. **Clusters de mechas** (rechazos múltiples en una zona).
+6. **Patrones de múltiples velas** (solo como confirmación).
+7. **Volatilidad (ATR)**.
 
-2. **Posición respecto a EMA20**: ¿El precio está por encima o por debajo? ¿La EMA20 actúa como soporte o resistencia?
+Con base en todo lo anterior, decide **Buy**, **Sell** o **Hold**.
 
-3. **Soportes y resistencias clave** (máximos/mínimos de 40 velas): ¿El precio ha roto alguno? Si rompió, ¿es un rompimiento verdadero (cierre fuera + vela grande) o falso (rechazo rápido)?
+**OBJETIVOS DE PRECIO BASADOS EN NIVELES VISUALES**:  
+- **sl_price**: Stop loss justo detrás del soporte (en compra) o resistencia (en venta), con un pequeño margen.
+- **tp1_price**: Primer objetivo parcial (cierre del 50%). Suele ser el primer nivel de soporte/resistencia claro en la dirección del trade.
+- **tp2_price** (opcional): Segundo objetivo parcial (cierre del 30%). Un nivel más lejano, como un máximo/mínimo reciente o zona de liquidez.
+Si no estás seguro de algún nivel, déjalo como `null`. No uses multiplicadores ATR a menos que no haya niveles claros.
 
-4. **Anatomía de las últimas 3 velas** (cuerpo, mecha superior, mecha inferior): ¿Hay figuras de reversión (Martillo, Estrella Fugaz, Doji)? ¿O de continuación (velas sólidas sin mechas)?
+**Razón principal**: Escribe una frase corta que resuma el análisis completo (ej. "Rebote en soporte semanal + martillo + sobreventa").
+**Razones**: Lista detallada de los elementos que usaste.
 
-5. **Clusters de mechas** (últimas 8 velas): ¿Hay zonas donde el precio ha rebotado varias veces? Eso indica liquidez o barreras psicológicas.
+**Lección reciente**: "{reglas_aprendidas}"
 
-6. **Patrones de múltiples velas** (Envolvente, Estrella Matutina, Tres Soldados, etc.) – solo como confirmación, no como señal única.
+**Formato JSON (una línea, tp2_price es opcional):**
+{{"decision":"Buy/Sell/Hold","razon_principal":"texto corto","razones":["r1","r2"],"sl_price":12345.67,"tp1_price":12500.00,"tp2_price":12700.00,"trailing_mult":1.8}}
 
-7. **Volatilidad (ATR)**: Indica si el mercado está expandido o contraído.
-
-**Con toda esa información**, decide si tomar **Buy**, **Sell** o **Hold**.  
-Si hay conflicto entre señales (ej. tendencia alcista pero patrón de reversión bajista), prioriza la tendencia macro y espera confirmación.
-
-**IMPORTANTE**: No tomes decisiones solo por un patrón de vela. Explica brevemente en "razones" qué elementos visuales usaste (ej. "rechazo en resistencia + martillo + sobreventa en EMA").
-
-**Lección de la experiencia reciente (debes considerarla, pero no seguirla ciegamente si el gráfico muestra lo contrario):**
-"{reglas_aprendidas}"
-
-**Formato JSON (una línea):**
-{{"decision":"Buy/Sell/Hold","patron":"ninguno o nombre","razones":["razón1","razón2"],"sl_mult":1.2,"tp1_mult":1.5,"trailing_mult":1.8}}
-
-Datos numéricos (solo referencia):
+Datos numéricos:
 {descripcion_texto}
 ATR: {atr:.2f}
 """
         response = client.chat.completions.create(
             model=MODELO_VISION,
             messages=[
-                {"role": "system", "content": "Eres un trader profesional que analiza gráficos de velas con metodología de Steven Nison. Responde SOLO con JSON válido en una línea."},
+                {"role": "system", "content": "Eres un trader profesional. Responde SOLO con JSON válido en una línea."},
                 {"role": "user", "content": [
                     {"type": "text", "text": prompt},
                     {"type": "image_url", "image_url": {"url": img_base64}}
@@ -444,40 +446,73 @@ ATR: {atr:.2f}
         print(f"📊 Tokens acumulados: {TOKENS_ACUMULADOS}")
 
         if not raw or raw.strip() == "":
-            return "Hold", ["Respuesta vacía"], "", (DEFAULT_SL_MULT, DEFAULT_TP1_MULT, DEFAULT_TRAILING_MULT)
+            return "Hold", ["Respuesta vacía"], "", (None, None, None), None, None, None
 
         datos = parse_json_seguro(raw)
         if not datos:
-            return "Hold", ["JSON inválido"], "", (DEFAULT_SL_MULT, DEFAULT_TP1_MULT, DEFAULT_TRAILING_MULT)
+            return "Hold", ["JSON inválido"], "", (None, None, None), None, None, None
 
         decision = datos.get("decision", "Hold")
-        sl_m = max(0.5, min(2.5, float(datos.get("sl_mult", 1.2))))
-        tp_m = max(0.8, min(3.0, float(datos.get("tp1_mult", 1.5))))
-        tr_m = max(1.0, min(3.0, float(datos.get("trailing_mult", 1.8))))
+        razon_principal = datos.get("razon_principal", "")
         razones = datos.get("razones", [])
+        if razon_principal and razon_principal not in razones:
+            razones.insert(0, razon_principal)
         
-        # ===== FILTRO DE CALIDAD DE SEÑAL =====
+        # Extraer precios
+        sl_price = datos.get("sl_price")
+        tp1_price = datos.get("tp1_price")
+        tp2_price = datos.get("tp2_price")  # opcional
+        trailing_mult = datos.get("trailing_mult", DEFAULT_TRAILING_MULT)
+        # Validar con precio actual (extraído de descripción o lo pasamos aparte)
+        precio_actual = float(descripcion_texto.split("Precio:")[1].split()[0]) if "Precio:" in descripcion_texto else None
+        if precio_actual is None:
+            precio_actual = 0
+        # Validar rangos
+        if sl_price is not None:
+            try:
+                sl_price = float(sl_price)
+                if (decision == "Buy" and sl_price >= precio_actual) or (decision == "Sell" and sl_price <= precio_actual):
+                    sl_price = None
+            except:
+                sl_price = None
+        if tp1_price is not None:
+            try:
+                tp1_price = float(tp1_price)
+                if (decision == "Buy" and tp1_price <= precio_actual) or (decision == "Sell" and tp1_price >= precio_actual):
+                    tp1_price = None
+            except:
+                tp1_price = None
+        if tp2_price is not None:
+            try:
+                tp2_price = float(tp2_price)
+                if (decision == "Buy" and tp2_price <= tp1_price) or (decision == "Sell" and tp2_price >= tp1_price):
+                    tp2_price = None
+            except:
+                tp2_price = None
+        
+        # Filtrar calidad (mínimo 3 elementos analizados)
         if decision != "Hold":
-            elementos_analizados = set()
+            elementos = set()
             for r in razones:
-                r_low = r.lower()
-                if "tendencia" in r_low or "trend" in r_low: elementos_analizados.add("trend")
-                if "ema" in r_low: elementos_analizados.add("ema")
-                if "soporte" in r_low or "resistencia" in r_low or "support" in r_low or "resistance" in r_low: elementos_analizados.add("s_r")
-                if "mecha" in r_low or "wick" in r_low: elementos_analizados.add("wick")
-                if "cluster" in r_low or "liquidez" in r_low: elementos_analizados.add("cluster")
-                if "patrón" in r_low or "vela" in r_low or "candle" in r_low: elementos_analizados.add("pattern")
-            if len(elementos_analizados) < 3:
-                print(f"⚠️ Señal pobre: solo {len(elementos_analizados)} elementos analizados -> Hold")
-                return "Hold", ["Análisis incompleto - faltan elementos visuales"], "", (DEFAULT_SL_MULT, DEFAULT_TP1_MULT, DEFAULT_TRAILING_MULT)
-
-        return decision, razones, datos.get("patron", ""), (sl_m, tp_m, tr_m)
+                rl = r.lower()
+                if "tendencia" in rl: elementos.add("trend")
+                if "ema" in rl: elementos.add("ema")
+                if "soporte" in rl or "resistencia" in rl: elementos.add("s_r")
+                if "mecha" in rl: elementos.add("wick")
+                if "cluster" in rl: elementos.add("cluster")
+                if "patrón" in rl: elementos.add("pattern")
+            if len(elementos) < 3:
+                print(f"⚠️ Señal pobre: solo {len(elementos)} elementos -> Hold")
+                return "Hold", ["Análisis incompleto"], "", (None, None, None), None, None, None
+        
+        multis = (None, None, trailing_mult)  # ya no usamos multiplicadores para SL/TP1
+        return decision, razones, razon_principal, multis, sl_price, tp1_price, tp2_price
 
     except Exception as e:
         print(f"❌ Error Qwen3-VL-32B-Instruct: {e} -> Hold")
-        return "Hold", [f"Error: {e}"], "", (DEFAULT_SL_MULT, DEFAULT_TP1_MULT, DEFAULT_TRAILING_MULT)
+        return "Hold", [f"Error: {e}"], "", (None, None, None), None, None, None
 
-# =================== AUTOAPRENDIZAJE (cada 10 trades NUEVOS) ===================
+# =================== AUTOAPRENDIZAJE ===================
 def aprender_de_trades():
     global ADAPTIVE_SL_MULT, ADAPTIVE_TP1_MULT, ADAPTIVE_TRAILING_MULT, ULTIMO_APRENDIZAJE, REGLAS_APRENDIDAS, TOKENS_ACUMULADOS, ULTIMO_PROFIT_FACTOR
     total = PAPER_TRADES_TOTALES
@@ -495,19 +530,18 @@ def aprender_de_trades():
     resumen = ""
     for i, t in enumerate(ultimos):
         estado = "WIN ✅" if t['resultado_win'] else "LOSS ❌"
-        resumen += f"{i+1}. {t['decision']} {estado} | {t.get('patron','?')} | PnL:{t['pnl']:.2f}\n"
+        resumen += f"{i+1}. {t['decision']} {estado} | {t.get('razon','?')} | PnL:{t['pnl']:.2f}\n"
 
-    # Ajuste adaptativo por Profit Factor
+    # Ajuste adaptativo solo del trailing multiplier (por si acaso)
     if profit_factor < 1.2 and winrate < 0.5:
-        ADAPTIVE_TP1_MULT = min(3.0, ADAPTIVE_TP1_MULT * 1.1)
-        ADAPTIVE_SL_MULT = max(0.5, ADAPTIVE_SL_MULT * 0.95)
-        telegram_mensaje(f"⚙️ Ajuste automático por PF bajo ({profit_factor:.2f}): TP1→{ADAPTIVE_TP1_MULT:.2f}, SL→{ADAPTIVE_SL_MULT:.2f}")
+        ADAPTIVE_TRAILING_MULT = max(1.0, min(3.0, ADAPTIVE_TRAILING_MULT * 1.05))
+        telegram_mensaje(f"⚙️ Ajuste por PF bajo: trailing_mult → {ADAPTIVE_TRAILING_MULT:.2f}")
 
     system_msg = """
 Eres el Mentor de Trading de una IA. Analiza los últimos 10 trades.
 Extrae una lección concreta para mejorar: ¿qué funcionó? ¿qué falló?
 Responde ÚNICAMENTE con un JSON en una línea:
-{"analisis":"explicación breve","nueva_regla":"lección práctica para futuras decisiones","sl_mult_sugerido":1.5,"tp1_mult_sugerido":1.5,"trailing_mult_sugerido":1.8}
+{"analisis":"explicación breve","nueva_regla":"lección práctica para futuras decisiones","trailing_mult_sugerido":1.8}
 """
     user_msg = f"Winrate: {winrate*100:.0f}% ({wins}W, {10-wins}L). Profit Factor: {profit_factor:.2f}\n\nHistorial:\n{resumen}\n\nDicta la nueva lección."
     try:
@@ -528,12 +562,9 @@ Responde ÚNICAMENTE con un JSON en una línea:
         datos = parse_json_seguro(raw)
         if datos:
             REGLAS_APRENDIDAS = datos.get("nueva_regla", REGLAS_APRENDIDAS)
-            # Solo aplicar sugerencias si el profit factor no es muy malo, si no preservamos el ajuste manual
             if profit_factor > 0.8:
-                ADAPTIVE_SL_MULT = max(0.5, min(2.5, float(datos.get("sl_mult_sugerido", ADAPTIVE_SL_MULT))))
-                ADAPTIVE_TP1_MULT = max(0.8, min(3.0, float(datos.get("tp1_mult_sugerido", ADAPTIVE_TP1_MULT))))
                 ADAPTIVE_TRAILING_MULT = max(1.0, min(3.0, float(datos.get("trailing_mult_sugerido", ADAPTIVE_TRAILING_MULT))))
-            msg = f"🧠 AUTOAPRENDIZAJE (10 trades nuevos)\n📊 Winrate: {winrate*100:.1f}% ({wins}W/{10-wins}L) | PF: {profit_factor:.2f}\n📜 Nueva lección: \"{REGLAS_APRENDIDAS}\"\n⚙️ SL:{ADAPTIVE_SL_MULT:.2f} TP1:{ADAPTIVE_TP1_MULT:.2f} Trail:{ADAPTIVE_TRAILING_MULT:.2f}"
+            msg = f"🧠 AUTOAPRENDIZAJE\n📊 WR: {winrate*100:.1f}% | PF: {profit_factor:.2f}\n📜 Lección: \"{REGLAS_APRENDIDAS}\"\n⚙️ Trail Mult: {ADAPTIVE_TRAILING_MULT:.2f}"
             telegram_mensaje(msg)
             print(msg)
         ULTIMO_APRENDIZAJE = total
@@ -562,7 +593,10 @@ def generar_grafico(df, trade_info, soporte, resistencia, slope, intercept, tipo
         decision = trade_info['decision']
         p_act = df_plot['close'].iloc[-2]
         ax.scatter(len(df_plot)-2, p_act + (-30 if decision=='Buy' else 30), s=400, marker='^' if decision=='Buy' else 'v', c='lime' if decision=='Buy' else 'red', zorder=5)
-        txt = f"[#{trade_info['id']}] {decision.upper()}\n{trade_info['patron']}\nSL:{trade_info['sl_inicial']:.2f} TP1:{trade_info['tp1']:.2f}"
+        razon = trade_info.get('razon', 'Sin razón')[:35]
+        txt = f"[#{trade_info['id']}] {decision.upper()}\n{razon}\nSL:{trade_info['sl_inicial']:.2f} TP1:{trade_info['tp1']:.2f}"
+        if trade_info.get('tp2'):
+            txt += f"\nTP2:{trade_info['tp2']:.2f}"
     else:
         win = trade_info['resultado_win']
         ax.axhline(trade_info['entrada'], color='blue', ls=':', lw=2, label='Entrada')
@@ -595,44 +629,66 @@ def risk_management_check():
         PAPER_STOPPED_TODAY = True
     return not PAPER_STOPPED_TODAY
 
-def paper_abrir_posicion(decision, precio, atr, razones, patron, multis_ia, df, sop, res, slo, inter):
+def paper_abrir_posicion(decision, precio, atr, razones, razon_principal, multis, sl_price, tp1_price, tp2_price, df, sop, res, slo, inter):
     global PAPER_BALANCE, TRADE_COUNTER
     if len(PAPER_ACTIVE_TRADES) >= MAX_CONCURRENT_TRADES:
         return False
     for t in PAPER_ACTIVE_TRADES.values():
         if t['decision'] == decision and abs(t['entrada'] - precio) < atr * 0.2:
             return False
-    sl_m = (multis_ia[0] * 0.6) + (ADAPTIVE_SL_MULT * 0.4)
-    tp_m = (multis_ia[1] * 0.6) + (ADAPTIVE_TP1_MULT * 0.4)
-    tr_m = (multis_ia[2] * 0.6) + (ADAPTIVE_TRAILING_MULT * 0.4)
     
-    distancia_sl = atr * sl_m
-    sl_inicial = precio - distancia_sl if decision == "Buy" else precio + distancia_sl
-    tp1 = precio + (atr * tp_m) if decision == "Buy" else precio - (atr * tp_m)
+    # Si no hay sl_price, usar ATR * adaptativo como fallback
+    if sl_price is None:
+        distancia_sl = atr * ADAPTIVE_SL_MULT
+        sl_inicial = precio - distancia_sl if decision == "Buy" else precio + distancia_sl
+        riesgo_usd = PAPER_BALANCE * RISK_PER_TRADE
+        size_btc = riesgo_usd / distancia_sl
+        max_size_btc = PAPER_BALANCE / precio
+        size_btc = min(size_btc, max_size_btc)
+        if size_btc <= 0:
+            return False
+        tp1 = None  # se usará trailing después, pero tp1_price puede ser null
+    else:
+        # SL visual
+        sl_inicial = sl_price
+        distancia_sl = abs(precio - sl_inicial)
+        if distancia_sl == 0:
+            return False
+        riesgo_usd = PAPER_BALANCE * RISK_PER_TRADE
+        size_btc = riesgo_usd / distancia_sl
+        max_size_btc = PAPER_BALANCE / precio
+        size_btc = min(size_btc, max_size_btc)
+        if size_btc <= 0:
+            return False
     
-    if distancia_sl == 0:
-        return False
+    # TP1 y TP2 visuales
+    tp1 = tp1_price
+    tp2 = tp2_price
     
-    # Cálculo correcto del tamaño de posición
-    riesgo_usd = PAPER_BALANCE * RISK_PER_TRADE
-    size_btc = riesgo_usd / distancia_sl
-    max_size_btc = PAPER_BALANCE / precio
-    size_btc = min(size_btc, max_size_btc)
-    
-    if size_btc <= 0:
-        return False
-        
     TRADE_COUNTER += 1
     trade = {
         "id": TRADE_COUNTER, "decision": decision, "entrada": precio,
-        "sl_inicial": sl_inicial, "tp1": tp1, "trailing_mult": tr_m,
-        "size_btc": size_btc, "size_restante": size_btc, "tp1_ejecutado": False,
-        "pnl_parcial": 0.0, "sl_actual": sl_inicial, "max_precio": precio,
-        "patron": patron, "atr_entrada": atr, "trailing_activo": False,
+        "sl_inicial": sl_inicial, "tp1": tp1, "tp2": tp2,
+        "trailing_mult": multis[2] if multis[2] else ADAPTIVE_TRAILING_MULT,
+        "size_btc": size_btc,
+        "size_restante_tp1": size_btc,      # después de TP1 quedará size_btc * 0.5 (si se da TP1)
+        "size_restante_tp2": size_btc,      # después de TP2 quedará size_btc * 0.2
+        "tp1_ejecutado": False,
+        "tp2_ejecutado": False,
+        "pnl_parcial_tp1": 0.0,
+        "pnl_parcial_tp2": 0.0,
+        "sl_actual": sl_inicial,
+        "max_precio": precio,
+        "razon": razon_principal or (razones[0] if razones else "Sin razón"),
+        "atr_entrada": atr,
+        "trailing_activo": False,
         "avance_minimo_alcanzado": False
     }
     PAPER_ACTIVE_TRADES[TRADE_COUNTER] = trade
-    msg = f"📌 [#{TRADE_COUNTER}] {decision.upper()} a {precio:.2f}\nSL:{sl_inicial:.2f} TP1:{tp1:.2f}\n{patron}\nRisk: {riesgo_usd:.2f} USDT | Size: {size_btc:.4f} BTC"
+    msg = f"📌 [#{TRADE_COUNTER}] {decision.upper()} a {precio:.2f}\nSL:{sl_inicial:.2f}"
+    if tp1: msg += f" TP1:{tp1:.2f}"
+    if tp2: msg += f" TP2:{tp2:.2f}"
+    msg += f"\n{trade['razon']}\nRisk: {riesgo_usd:.2f} USDT | Size: {size_btc:.4f} BTC"
     print(msg)
     telegram_mensaje(msg)
     ruta_img = generar_grafico(df, trade, sop, res, slo, inter, "Entrada")
@@ -650,10 +706,9 @@ def paper_revisar_sl_tp(df, sop, res, slo, inter):
     for t_id, t in PAPER_ACTIVE_TRADES.items():
         cerrar = False
         motivo = ""
-        # Actualizar máximo/mínimo para trailing
+        # Actualizar máximo/mínimo
         if t['decision'] == "Buy":
             t['max_precio'] = max(t['max_precio'], h)
-            # Verificar si se alcanzó avance mínimo para activar trailing (1.2 * ATR)
             if not t['avance_minimo_alcanzado'] and (t['max_precio'] - t['entrada']) > t['atr_entrada'] * 1.2:
                 t['avance_minimo_alcanzado'] = True
         else:
@@ -661,23 +716,40 @@ def paper_revisar_sl_tp(df, sop, res, slo, inter):
             if not t['avance_minimo_alcanzado'] and (t['entrada'] - t['max_precio']) > t['atr_entrada'] * 1.2:
                 t['avance_minimo_alcanzado'] = True
         
-        # Verificar TP1
-        if not t['tp1_ejecutado']:
+        # TP1 (cierra 50%)
+        if not t['tp1_ejecutado'] and t['tp1'] is not None:
             if (t['decision'] == "Buy" and h >= t['tp1']) or (t['decision'] == "Sell" and l <= t['tp1']):
-                beneficio = abs(t['tp1'] - t['entrada']) * (t['size_btc'] * PORCENTAJE_CIERRE_TP1)
-                t['pnl_parcial'] = beneficio
+                beneficio = abs(t['tp1'] - t['entrada']) * (t['size_btc'] * PCT_TP1)
+                t['pnl_parcial_tp1'] = beneficio
                 PAPER_BALANCE += beneficio
-                t['size_restante'] *= (1 - PORCENTAJE_CIERRE_TP1)
+                # Reducir tamaño restante: después de TP1 queda (1 - PCT_TP1) del total
+                t['size_restante_tp1'] = t['size_btc'] * (1 - PCT_TP1)
                 t['tp1_ejecutado'] = True
-                # SL a entrada + 0.5 ATR (breakeven plus)
+                # Mover SL a breakeven + 0.5 ATR
                 if t['decision'] == "Buy":
                     t['sl_actual'] = t['entrada'] + t['atr_entrada'] * 0.5
                 else:
                     t['sl_actual'] = t['entrada'] - t['atr_entrada'] * 0.5
                 telegram_mensaje(f"🎯 TP1 #{t_id}: +{beneficio:.2f} USD, SL movido a {t['sl_actual']:.2f}")
         
-        # Trailing stop después de TP1 solo si se ha alcanzado avance mínimo
-        if t['tp1_ejecutado'] and t['avance_minimo_alcanzado']:
+        # TP2 (cierra 30% del total original)
+        if t['tp1_ejecutado'] and not t['tp2_ejecutado'] and t['tp2'] is not None:
+            if (t['decision'] == "Buy" and h >= t['tp2']) or (t['decision'] == "Sell" and l <= t['tp2']):
+                # El 30% del total original
+                beneficio = abs(t['tp2'] - t['entrada']) * (t['size_btc'] * PCT_TP2)
+                t['pnl_parcial_tp2'] = beneficio
+                PAPER_BALANCE += beneficio
+                # Después de TP2 queda solo el 20% (PCT_TRAILING = 1 - 0.5 - 0.3 = 0.2)
+                t['size_restante_tp2'] = t['size_btc'] * (1 - PCT_TP1 - PCT_TP2)
+                t['tp2_ejecutado'] = True
+                # Activar trailing para el remanente
+                t['trailing_activo'] = True
+                telegram_mensaje(f"🎯 TP2 #{t_id}: +{beneficio:.2f} USD. Restante {t['size_restante_tp2']:.4f} BTC en trailing.")
+        
+        # Trailing stop para el remanente (20%) después de TP2 (o si no hay TP2, después de TP1)
+        trailing_restante = t['tp2_ejecutado'] or (t['tp1_ejecutado'] and t['tp2'] is None)
+        if trailing_restante and t['avance_minimo_alcanzado']:
+            # Calcular nuevo SL dinámico
             nuevo_sl = t['max_precio'] - (t['atr_entrada'] * t['trailing_mult']) if t['decision'] == "Buy" else t['max_precio'] + (t['atr_entrada'] * t['trailing_mult'])
             if t['decision'] == "Buy":
                 if nuevo_sl > t['sl_actual']:
@@ -689,26 +761,34 @@ def paper_revisar_sl_tp(df, sop, res, slo, inter):
                     old = t['sl_actual']
                     t['sl_actual'] = nuevo_sl
                     telegram_mensaje(f"🔄 [#{t_id}] Trailing Stop ajustado a: {t['sl_actual']:.2f} (antes {old:.2f})")
-            # Verificar si el SL fue tocado
+            # Verificar si se tocó el stop
             if (t['decision'] == "Buy" and l <= t['sl_actual']) or (t['decision'] == "Sell" and h >= t['sl_actual']):
                 cerrar = True
-                motivo = "Trailing Stop"
+                motivo = "Trailing Stop (remanente)"
         else:
-            # Stop loss inicial (si no se ha alcanzado TP1 aún)
+            # Stop loss inicial si no se ha alcanzado TP1 aún
             if not t['tp1_ejecutado']:
                 if (t['decision'] == "Buy" and l <= t['sl_inicial']) or (t['decision'] == "Sell" and h >= t['sl_inicial']):
                     cerrar = True
                     motivo = "Stop Loss"
                     t['sl_actual'] = t['sl_inicial']
-            else:
-                # Si TP1 ejecutado pero no se ha alcanzado avance mínimo (raro), usar sl_actual como está
+            # Si TP1 ejecutado pero aún no TP2 (y existe TP2), el SL está en breakeven, verificar
+            elif t['tp1_ejecutado'] and not t['tp2_ejecutado'] and t['tp2'] is not None:
                 if (t['decision'] == "Buy" and l <= t['sl_actual']) or (t['decision'] == "Sell" and h >= t['sl_actual']):
                     cerrar = True
-                    motivo = "Stop Loss (post TP1)"
+                    motivo = "Stop Loss (post TP1, antes TP2)"
+            # Si TP1 ejecutado y no hay TP2, ya estamos en trailing (arriba) pero puede cerrar por trailing ya cubierto
         
         if cerrar:
-            pnl_rest = (t['sl_actual'] - t['entrada']) * t['size_restante'] if t['decision'] == "Buy" else (t['entrada'] - t['sl_actual']) * t['size_restante']
-            pnl_total = t['pnl_parcial'] + pnl_rest
+            # Calcular tamaño restante a cerrar
+            if t['tp2_ejecutado']:
+                remaining_size = t['size_restante_tp2']
+            elif t['tp1_ejecutado']:
+                remaining_size = t['size_restante_tp1']
+            else:
+                remaining_size = t['size_btc']
+            pnl_rest = (t['sl_actual'] - t['entrada']) * remaining_size if t['decision'] == "Buy" else (t['entrada'] - t['sl_actual']) * remaining_size
+            pnl_total = t['pnl_parcial_tp1'] + t['pnl_parcial_tp2'] + pnl_rest
             PAPER_BALANCE += pnl_rest
             PAPER_TRADES_TOTALES += 1
             win = pnl_total > 0
@@ -722,7 +802,7 @@ def paper_revisar_sl_tp(df, sop, res, slo, inter):
             TRADE_HISTORY.append({
                 "fecha": datetime.now(timezone.utc).isoformat(),
                 "decision": t['decision'],
-                "patron": t['patron'],
+                "razon": t['razon'],
                 "pnl": pnl_total,
                 "resultado_win": win
             })
@@ -733,10 +813,8 @@ def paper_revisar_sl_tp(df, sop, res, slo, inter):
             ruta_img = generar_grafico(df, t, sop, res, slo, inter, "Salida")
             if ruta_img:
                 telegram_enviar_imagen(ruta_img, msg)
-    # Cerrar trades marcados
     for t_id in trades_a_cerrar:
         del PAPER_ACTIVE_TRADES[t_id]
-    # Autoaprendizaje si hay al menos 10 trades nuevos desde la última vez
     if PAPER_TRADES_TOTALES - ULTIMO_APRENDIZAJE >= 10:
         aprender_de_trades()
 
@@ -744,8 +822,8 @@ def paper_revisar_sl_tp(df, sop, res, slo, inter):
 def run_bot():
     global ULTIMA_DECISION, ULTIMO_MOTIVO, TOKENS_ACUMULADOS
     cargar_memoria()
-    print(f"🤖 BOT V99.40 INICIADO - Modelo {MODELO_VISION} con SiliconFlow (multimodal + memoria dinámica + PF adaptive)")
-    telegram_mensaje(f"🤖 BOT V99.40 INICIADO - Modelo {MODELO_VISION}\nSistema Multi-Trades con análisis visual de gráficos y autoaprendizaje cada 10 trades.\nProfit Factor adaptativo activado.")
+    print(f"🤖 BOT V99.43 INICIADO - SL/TP visuales + TP1/TP2 + trailing final")
+    telegram_mensaje(f"🤖 BOT V99.43 INICIADO - Niveles SL/TP/Ignite según análisis visual.\n50% TP1 | 30% TP2 | 20% trailing.")
     ultima_vela = None
     while True:
         try:
@@ -780,10 +858,10 @@ def run_bot():
                     ultima_vela = vela_cerrada
                     time.sleep(SLEEP_SECONDS)
                     continue
-                decision, razones, patron, multis = analizar_con_qwen(desc, atr_val, REGLAS_APRENDIDAS, img)
+                decision, razones, razon_principal, multis, sl_price, tp1_price, tp2_price = analizar_con_qwen(desc, atr_val, REGLAS_APRENDIDAS, img)
                 ULTIMA_DECISION, ULTIMO_MOTIVO = decision, razones[0] if razones else ""
                 if decision in ["Buy","Sell"] and risk_management_check():
-                    paper_abrir_posicion(decision, precio, atr_val, razones, patron, multis, df, sop, res, slo, inter)
+                    paper_abrir_posicion(decision, precio, atr_val, razones, razon_principal, multis, sl_price, tp1_price, tp2_price, df, sop, res, slo, inter)
                 else:
                     print(f"⏸️ Hold: {ULTIMO_MOTIVO[:80]}")
                 ultima_vela = vela_cerrada
