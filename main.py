@@ -1,4 +1,4 @@
-# BOT TRADING V99.43 – QWEN3-VL-32B-Instruct (EDICIÓN COMPLETA CORREGIDA)
+# BOT TRADING V99.43 – QWEN3-VL-32B-Instruct (EDICIÓN FINAL - FIX JSON SERIALIZABLE)
 # ==============================================================================
 import os, time, requests, json, numpy as np, pandas as pd
 from scipy.stats import linregress
@@ -21,22 +21,28 @@ SILICONFLOW_BASE_URL = "https://api.siliconflow.com/v1"
 client = OpenAI(api_key=SILICONFLOW_API_KEY, base_url=SILICONFLOW_BASE_URL)
 MODELO_VISION = "Qwen/Qwen3-VL-32B-Instruct"
 
-# --- CORRECCIÓN: Definición de variables de Telegram ---
+# --- Definición de variables de Telegram ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 BASE_URL = "https://api.bybit.com"
 
-# ====== MEMORIA PERSISTENTE ======
+# ====== MEMORIA PERSISTENTE (CORREGIDA) ======
 MEMORY_FILE = "memoria_bot.json"
 
 def convertir_serializable(obj):
-    if isinstance(obj, (np.integer, np.int64)): return int(obj)
-    elif isinstance(obj, (np.floating, np.float64)): return float(obj)
-    elif isinstance(obj, np.bool_): return bool(obj)
-    elif isinstance(obj, np.ndarray): return obj.tolist()
-    elif isinstance(obj, dict): return {k: convertir_serializable(v) for k, v in obj.items()}
-    elif isinstance(obj, (list, tuple)): return [convertir_serializable(item) for item in obj]
-    else: return obj
+    """Convierte cualquier objeto de NumPy o Pandas a tipos nativos de Python."""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, np.generic):
+        return obj.item()  # Convierte tipos scalar de numpy (int64, float64, bool_) a nativos
+    elif isinstance(obj, dict):
+        return {str(k): convertir_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [convertir_serializable(item) for item in obj]
+    elif isinstance(obj, (bool, int, float, str)) or obj is None:
+        return obj
+    else:
+        return str(obj) # Fallback para evitar errores de serialización
 
 def guardar_memoria():
     global ULTIMO_APRENDIZAJE, TOKENS_ACUMULADOS
@@ -61,10 +67,13 @@ def guardar_memoria():
         "ULTIMO_PROFIT_FACTOR": ULTIMO_PROFIT_FACTOR
     }
     try:
+        # Aquí aplicamos la conversión robusta antes de guardar
+        data_para_guardar = convertir_serializable(data)
         with open(MEMORY_FILE, "w") as f:
-            json.dump(convertir_serializable(data), f, indent=4)
-        print("💾 Memoria guardada")
-    except Exception as e: print(f"Error guardando memoria: {e}")
+            json.dump(data_para_guardar, f, indent=4)
+        print("💾 Memoria guardada sin errores de tipos")
+    except Exception as e: 
+        print(f"Error crítico guardando memoria: {e}")
 
 def cargar_memoria():
     global TRADE_HISTORY, REGLAS_APRENDIDAS, PAPER_BALANCE, PAPER_WIN, PAPER_LOSS
@@ -82,7 +91,7 @@ def cargar_memoria():
         ULTIMO_APRENDIZAJE = data.get("ULTIMO_APRENDIZAJE", 0)
         TOKENS_ACUMULADOS = data.get("TOKENS_ACUMULADOS", 0)
         ULTIMO_PROFIT_FACTOR = data.get("ULTIMO_PROFIT_FACTOR", 1.0)
-        print(f"🧠 Memoria cargada. Trades: {PAPER_TRADES_TOTALES}")
+        print(f"🧠 Memoria cargada. Trades totales registrados: {PAPER_TRADES_TOTALES}")
     except Exception as e: print(f"Error cargando memoria: {e}")
 
 def parse_json_seguro(raw):
@@ -101,7 +110,7 @@ SLEEP_SECONDS = 60
 GRAFICO_VELAS_LIMIT = 120
 MAX_CONCURRENT_TRADES = 3
 
-PCT_TP1, PCT_TP2 = 0.50, 0.30  # El 20% restante va a trailing
+PCT_TP1, PCT_TP2 = 0.50, 0.30  # El 20% restante va a trailing estructural
 
 PAPER_BALANCE_INICIAL = 100.0
 PAPER_BALANCE = PAPER_BALANCE_INICIAL
@@ -115,7 +124,7 @@ PAPER_STOPPED_TODAY = False
 PAPER_CURRENT_DAY = None
 
 ULTIMO_APRENDIZAJE, ULTIMO_PROFIT_FACTOR = 0, 1.0
-REGLAS_APRENDIDAS = "Aún no hay lecciones. Busca confluencia."
+REGLAS_APRENDIDAS = "Analiza confluencia visual: Líneas cian/magenta y EMA20 amarilla."
 TOKENS_ACUMULADOS = 0
 
 # =================== COMUNICACIÓN TELEGRAM ===================
@@ -143,7 +152,7 @@ def reporte_estado():
         f"📈 PnL: {pnl_global:+.2f} USDT\n"
         f"🎯 Winrate: {winrate:.1f}%\n"
         f"⚡ Activos: {len(PAPER_ACTIVE_TRADES)}\n"
-        f"📐 PF (10t): {ULTIMO_PROFIT_FACTOR:.2f}"
+        f"📐 PF (últ 10t): {ULTIMO_PROFIT_FACTOR:.2f}"
     )
     telegram_mensaje(mensaje)
 
@@ -252,11 +261,11 @@ def analizar_con_qwen(descripcion_texto, atr, reglas, imagen):
         img_b64 = pil_to_base64(imagen)
         prompt = f"""
 Eres Trader Senior. Mira el gráfico (Cian=Sop, Magenta=Res, Amarillo=EMA20).
-Define niveles VISUALES de salida. 
-1. sl_price: Invalidación real.
-2. tp1_price: Obstáculo cercano.
-3. tp2_price: Nivel de liquidez lejano.
-4. trailing_logic: "EMA20" o "LOW_CANDLE".
+Define niveles VISUALES de salida para un trader. 
+1. sl_price: Precio donde el trade pierde sentido (invalidación visual).
+2. tp1_price: Primer objetivo (obstáculo visual cercano).
+3. tp2_price: Nivel de liquidez lejano o máximo/mínimo mayor.
+4. trailing_logic: "EMA20" (seguir línea amarilla) o "LOW_CANDLE" (mínimo vela anterior).
 
 JSON (una línea):
 {{"decision":"Buy/Sell/Hold","razon":"texto","sl_price":0.0,"tp1_price":0.0,"tp2_price":0.0,"trailing_logic":"EMA20/LOW_CANDLE"}}
@@ -281,6 +290,7 @@ def paper_abrir_posicion(decision, precio, atr, razon, sl_ia, tp1_ia, tp2_ia, lo
     if len(PAPER_ACTIVE_TRADES) >= MAX_CONCURRENT_TRADES: return
     
     sl_final = float(sl_ia) if sl_ia else (precio - atr*1.5 if decision=="Buy" else precio + atr*1.5)
+    # Sanitización de SL
     if decision == "Buy" and sl_final >= precio: sl_final = precio - atr
     if decision == "Sell" and sl_final <= precio: sl_final = precio + atr
 
@@ -295,11 +305,17 @@ def paper_abrir_posicion(decision, precio, atr, razon, sl_ia, tp1_ia, tp2_ia, lo
         "tp1_ejecutado": False, "tp2_ejecutado": False, "pnl_parcial": 0.0, "razon": razon
     }
     PAPER_ACTIVE_TRADES[TRADE_COUNTER] = t
-    msg = f"🚀 [#{TRADE_COUNTER}] {decision} en {precio:.2f}\nRazon: {razon}"
+    msg = f"🚀 [#{TRADE_COUNTER}] {decision.upper()} en {precio:.2f}\nSL Visual: {sl_final:.2f} | Trailing: {logic_ia}\nRazon: {razon}"
     telegram_mensaje(msg)
-    # Generar gráfico simple para Telegram
-    fig, ax = plt.subplots(); ax.plot(df.tail(20)['close'].values); plt.savefig("/tmp/in.png"); plt.close()
+    
+    # Gráfico miniatura de entrada
+    fig, ax = plt.subplots(figsize=(6,3))
+    ax.plot(df.tail(20)['close'].values, color='cyan')
+    ax.set_title(f"Entrada {decision}")
+    plt.savefig("/tmp/in.png")
+    plt.close()
     telegram_enviar_imagen("/tmp/in.png", msg)
+    guardar_memoria()
 
 def paper_revisar_sl_tp(df):
     global PAPER_BALANCE, PAPER_WIN, PAPER_LOSS, PAPER_TRADES_TOTALES, TRADE_HISTORY
@@ -310,53 +326,64 @@ def paper_revisar_sl_tp(df):
     
     cerrar_ids = []
     for tid, t in PAPER_ACTIVE_TRADES.items():
-        # TP1 (50%)
+        # TP1 (Cierre parcial 50%)
         if not t['tp1_ejecutado'] and t['tp1']:
             if (t['decision']=="Buy" and h>=t['tp1']) or (t['decision']=="Sell" and l<=t['tp1']):
                 ganancia = abs(t['tp1'] - t['entrada']) * (t['size_btc'] * PCT_TP1)
                 t['pnl_parcial'] += ganancia
                 PAPER_BALANCE += ganancia
                 t['tp1_ejecutado'] = True
-                t['sl_actual'] = t['entrada']
-                telegram_mensaje(f"🎯 TP1 #{tid} hit. SL a Breakeven.")
+                t['sl_actual'] = t['entrada'] # Breakeven técnico
+                telegram_mensaje(f"🎯 TP1 alcanzado en #{tid}. SL movido a Breakeven.")
         
-        # TP2 (30%)
+        # TP2 (Cierre parcial 30%)
         if t['tp1_ejecutado'] and not t['tp2_ejecutado'] and t['tp2']:
             if (t['decision']=="Buy" and h>=t['tp2']) or (t['decision']=="Sell" and l<=t['tp2']):
                 ganancia = abs(t['tp2'] - t['entrada']) * (t['size_btc'] * PCT_TP2)
                 t['pnl_parcial'] += ganancia
                 PAPER_BALANCE += ganancia
                 t['tp2_ejecutado'] = True
-                telegram_mensaje(f"🎯 TP2 #{tid} hit.")
+                telegram_mensaje(f"🎯 TP2 alcanzado en #{tid}. Restante en Trailing Final.")
 
-        # Trailing / SL
+        # Lógica de Salida (Trailing / Stop Loss)
         cerrar, motivo = False, ""
         if t['tp1_ejecutado']:
             if t['decision']=="Buy":
+                # Trailing estructural
                 t['sl_actual'] = max(t['sl_actual'], ema-(atr*0.2) if t['trailing_logic']=="EMA20" else l_prev)
-                if l <= t['sl_actual']: cerrar, motivo = True, "Trailing"
+                if l <= t['sl_actual']: cerrar, motivo = True, "Trailing Stop"
             else:
                 t['sl_actual'] = min(t['sl_actual'], ema+(atr*0.2) if t['trailing_logic']=="EMA20" else h_prev)
-                if h >= t['sl_actual']: cerrar, motivo = True, "Trailing"
+                if h >= t['sl_actual']: cerrar, motivo = True, "Trailing Stop"
         else:
+            # Stop Loss Inicial
             if (t['decision']=="Buy" and l <= t['sl_inicial']) or (t['decision']=="Sell" and h >= t['sl_inicial']):
                 cerrar, motivo = True, "Stop Loss"
 
         if cerrar:
+            # Cálculo de PnL del tramo final
             pct = 0.20 if t['tp2_ejecutado'] else (0.50 if t['tp1_ejecutado'] else 1.0)
-            pnl_f = (t['sl_actual']-t['entrada'])*t['size_btc']*pct if t['decision']=="Buy" else (t['entrada']-t['sl_actual'])*t['size_btc']*pct
-            pnl_t = t['pnl_parcial'] + pnl_f
-            PAPER_BALANCE += pnl_f
+            pnl_final = (t['sl_actual'] - t['entrada']) * (t['size_btc'] * pct) if t['decision']=="Buy" else (t['entrada'] - t['sl_actual']) * (t['size_btc'] * pct)
+            pnl_total = float(t['pnl_parcial'] + pnl_final)
+            PAPER_BALANCE += float(pnl_final)
             PAPER_TRADES_TOTALES += 1
-            if pnl_t > 0: PAPER_WIN += 1
+            if pnl_total > 0: PAPER_WIN += 1
             else: PAPER_LOSS += 1
-            TRADE_HISTORY.append({"pnl": pnl_t, "resultado_win": pnl_t > 0, "decision": t['decision'], "razon": t['razon']})
+            
+            # Guardamos con tipos nativos para evitar errores de JSON
+            TRADE_HISTORY.append({
+                "pnl": pnl_total, 
+                "resultado_win": bool(pnl_total > 0), 
+                "decision": t['decision'], 
+                "razon": t['razon']
+            })
             cerrar_ids.append(tid)
-            telegram_mensaje(f"📤 CERRADO #{tid} ({motivo}). PnL: {pnl_t:.2f} USDT")
+            telegram_mensaje(f"📤 CERRADO #{tid} por {motivo}. PnL: {pnl_total:.2f} USDT")
             reporte_estado()
 
     for tid in cerrar_ids: del PAPER_ACTIVE_TRADES[tid]
     if len(TRADE_HISTORY) > 0 and len(TRADE_HISTORY) % 10 == 0: aprender_de_trades()
+    if cerrar_ids: guardar_memoria()
 
 # =================== AUTOAPRENDIZAJE Y LOOP ===================
 def aprender_de_trades():
@@ -365,7 +392,7 @@ def aprender_de_trades():
     gan = sum(t['pnl'] for t in ult if t['pnl']>0)
     per = abs(sum(t['pnl'] for t in ult if t['pnl']<0))
     ULTIMO_PROFIT_FACTOR = gan/per if per>0 else 1.0
-    prompt = f"Analiza estos 10 trades y dame una lección corta: {json.dumps(ult)}"
+    prompt = f"Analiza estos últimos 10 trades y dame una lección técnica para mejorar: {json.dumps(convertir_serializable(ult))}"
     try:
         resp = client.chat.completions.create(model=MODELO_VISION, messages=[{"role":"user","content":prompt}])
         REGLAS_APRENDIDAS = resp.choices[0].message.content
@@ -378,15 +405,17 @@ def risk_management_check():
     global PAPER_DAILY_START_BALANCE, PAPER_STOPPED_TODAY, PAPER_CURRENT_DAY
     hoy = datetime.now(timezone.utc).date()
     if PAPER_CURRENT_DAY != hoy:
-        PAPER_CURRENT_DAY, PAPER_DAILY_START_BALANCE, PAPER_STOPPED_TODAY = hoy, PAPER_BALANCE, False
-    if (PAPER_BALANCE - PAPER_DAILY_START_BALANCE) / PAPER_DAILY_START_BALANCE <= -MAX_DAILY_DRAWDOWN_PCT:
+        PAPER_DAILY_START_BALANCE, PAPER_STOPPED_TODAY, PAPER_CURRENT_DAY = PAPER_BALANCE, False, hoy
+    drawdown = (PAPER_BALANCE - PAPER_DAILY_START_BALANCE) / PAPER_DAILY_START_BALANCE
+    if drawdown <= -MAX_DAILY_DRAWDOWN_PCT:
+        if not PAPER_STOPPED_TODAY: telegram_mensaje("🛑 Pausado por Drawdown Diario.")
         PAPER_STOPPED_TODAY = True
     return not PAPER_STOPPED_TODAY
 
 def run_bot():
     cargar_memoria()
-    print("🤖 BOT V99.43 INICIADO")
-    telegram_mensaje("🤖 Bot V99.43 Online - Estructural Visual")
+    print("🤖 BOT V99.43 ESTRUCTURAL VISUAL INICIADO")
+    telegram_mensaje("🤖 Bot V99.43 Online - Gestión Estructural Visual")
     ultima_vela = None
     while True:
         try:
@@ -404,7 +433,7 @@ def run_bot():
             paper_revisar_sl_tp(df)
             time.sleep(SLEEP_SECONDS)
         except Exception as e:
-            print(f"Error: {e}"); time.sleep(30)
+            print(f"Error Loop: {e}"); time.sleep(30)
 
 if __name__ == '__main__':
     run_bot()
