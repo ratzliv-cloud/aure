@@ -1,5 +1,5 @@
-# BOT TRADING V99.43 – QWEN3-VL-32B-Instruct (EDICIÓN COMPLETA CORREGIDA + LOGS DETALLADOS)
-# ==============================================================================
+# BOT TRADING REAL – Bybit + Qwen3-VL-32B-Instruct (EJECUCIÓN REAL, APALANCAMIENTO 10x)
+# ===================================================================================
 import os, time, requests, json, numpy as np, pandas as pd
 from scipy.stats import linregress
 from datetime import datetime, timezone
@@ -11,6 +11,7 @@ import io
 import json_repair
 import base64
 from openai import OpenAI
+from pybit.unified_trading import HTTP  # Para operar real en Bybit
 
 # =================== CONFIGURACIÓN DE APIS ===================
 SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY")
@@ -23,13 +24,20 @@ MODELO_VISION = "Qwen/Qwen3-VL-32B-Instruct"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-BASE_URL = "https://api.bybit.com"
+
+# Bybit (real)
+BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
+BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
+if not BYBIT_API_KEY or not BYBIT_API_SECRET:
+    raise ValueError("Faltan BYBIT_API_KEY o BYBIT_API_SECRET")
+
+session = HTTP(testnet=False, api_key=BYBIT_API_KEY, api_secret=BYBIT_API_SECRET)
+BASE_URL = "https://api.bybit.com"  # solo para datos públicos (se sigue usando requests)
 
 # ====== MEMORIA PERSISTENTE ======
-MEMORY_FILE = "memoria_bot.json"
+MEMORY_FILE = "memoria_bot_real.json"
 
 def convertir_serializable(obj):
-    """Convierte cualquier tipo numpy a tipo nativo Python para JSON"""
     if isinstance(obj, np.generic):
         return obj.item()
     if isinstance(obj, dict):
@@ -39,50 +47,55 @@ def convertir_serializable(obj):
     return obj
 
 def guardar_memoria():
-    global ULTIMO_APRENDIZAJE, TOKENS_ACUMULADOS
+    global ULTIMO_APRENDIZAJE, TOKENS_ACUMULADOS, REAL_ACTIVE_TRADES, REAL_BALANCE
     active_trades_meta = {}
-    for tid, t in PAPER_ACTIVE_TRADES.items():
+    for tid, t in REAL_ACTIVE_TRADES.items():
         active_trades_meta[tid] = {
             "id": t["id"], "decision": t["decision"], "entrada": t["entrada"],
             "razon": t.get("razon", ""), "tp1_ejecutado": t["tp1_ejecutado"],
             "tp2_ejecutado": t.get("tp2_ejecutado", False),
-            "sl_actual": t.get("sl_actual"), "trailing_logic": t.get("trailing_logic", "EMA20")
+            "sl_actual": t.get("sl_actual"), "trailing_logic": t.get("trailing_logic", "EMA20"),
+            "qty_original": t.get("qty_original"), "qty_restante": t.get("qty_restante")
         }
     data = {
         "TRADE_HISTORY": TRADE_HISTORY,
         "REGLAS_APRENDIDAS": REGLAS_APRENDIDAS,
-        "PAPER_BALANCE": PAPER_BALANCE,
-        "PAPER_WIN": PAPER_WIN,
-        "PAPER_LOSS": PAPER_LOSS,
-        "PAPER_TRADES_TOTALES": PAPER_TRADES_TOTALES,
+        "REAL_BALANCE": REAL_BALANCE,
+        "WIN_COUNT": WIN_COUNT,
+        "LOSS_COUNT": LOSS_COUNT,
+        "TOTAL_TRADES": TOTAL_TRADES,
         "ULTIMO_APRENDIZAJE": ULTIMO_APRENDIZAJE,
         "TOKENS_ACUMULADOS": TOKENS_ACUMULADOS,
-        "PAPER_ACTIVE_META": active_trades_meta,
+        "ACTIVE_TRADES_META": active_trades_meta,
         "ULTIMO_PROFIT_FACTOR": ULTIMO_PROFIT_FACTOR
     }
     try:
         with open(MEMORY_FILE, "w") as f:
             json.dump(convertir_serializable(data), f, indent=4)
-        print("💾 Memoria guardada")
+        print("💾 Memoria guardada (real)")
     except Exception as e: print(f"Error guardando memoria: {e}")
 
 def cargar_memoria():
-    global TRADE_HISTORY, REGLAS_APRENDIDAS, PAPER_BALANCE, PAPER_WIN, PAPER_LOSS
-    global PAPER_TRADES_TOTALES, ULTIMO_APRENDIZAJE, TOKENS_ACUMULADOS, ULTIMO_PROFIT_FACTOR
+    global TRADE_HISTORY, REGLAS_APRENDIDAS, REAL_BALANCE, WIN_COUNT, LOSS_COUNT
+    global TOTAL_TRADES, ULTIMO_APRENDIZAJE, TOKENS_ACUMULADOS, ULTIMO_PROFIT_FACTOR
     if not os.path.exists(MEMORY_FILE): return
     try:
         with open(MEMORY_FILE, "r") as f:
             data = json.load(f)
         TRADE_HISTORY = data.get("TRADE_HISTORY", [])
         REGLAS_APRENDIDAS = data.get("REGLAS_APRENDIDAS", REGLAS_APRENDIDAS)
-        PAPER_BALANCE = data.get("PAPER_BALANCE", 100.0)
-        PAPER_WIN = data.get("PAPER_WIN", 0)
-        PAPER_LOSS = data.get("PAPER_LOSS", 0)
-        PAPER_TRADES_TOTALES = data.get("PAPER_TRADES_TOTALES", 0)
+        REAL_BALANCE = data.get("REAL_BALANCE", None)  # se actualizará desde el exchange
+        WIN_COUNT = data.get("WIN_COUNT", 0)
+        LOSS_COUNT = data.get("LOSS_COUNT", 0)
+        TOTAL_TRADES = data.get("TOTAL_TRADES", 0)
         ULTIMO_APRENDIZAJE = data.get("ULTIMO_APRENDIZAJE", 0)
         TOKENS_ACUMULADOS = data.get("TOKENS_ACUMULADOS", 0)
         ULTIMO_PROFIT_FACTOR = data.get("ULTIMO_PROFIT_FACTOR", 1.0)
-        print(f"🧠 Memoria cargada. Trades: {PAPER_TRADES_TOTALES}")
+        # Restaurar operaciones activas
+        active_meta = data.get("ACTIVE_TRADES_META", {})
+        for tid, meta in active_meta.items():
+            REAL_ACTIVE_TRADES[int(tid)] = meta
+        print(f"🧠 Memoria cargada. Trades reales: {TOTAL_TRADES}")
     except Exception as e: print(f"Error cargando memoria: {e}")
 
 def parse_json_seguro(raw):
@@ -95,28 +108,103 @@ def parse_json_seguro(raw):
 # =================== CONFIGURACIÓN DEL BOT ===================
 SYMBOL = "BTCUSDT"
 INTERVAL = "5"
-RISK_PER_TRADE = 0.02
+RISK_PER_TRADE = 0.02      # 2% del capital por operación
 LEVERAGE = 10
 SLEEP_SECONDS = 60
 GRAFICO_VELAS_LIMIT = 120
-MAX_CONCURRENT_TRADES = 3
+MAX_CONCURRENT_TRADES = 1   # En real, solo una posición simultánea para este símbolo
 
-PCT_TP1, PCT_TP2 = 0.50, 0.30  # El 20% restante va a trailing
+PCT_TP1, PCT_TP2 = 0.50, 0.30   # 50% TP1, 30% TP2, 20% trailing
 
-PAPER_BALANCE_INICIAL = 100.0
-PAPER_BALANCE = PAPER_BALANCE_INICIAL
-PAPER_ACTIVE_TRADES = {}
-TRADE_COUNTER, PAPER_WIN, PAPER_LOSS, PAPER_TRADES_TOTALES = 0, 0, 0, 0
-TRADE_HISTORY = []
+# Estado real
+REAL_BALANCE = None          # se obtendrá de Bybit
+REAL_ACTIVE_TRADES = {}      # trades activos reales
+TRADE_COUNTER = 0
+WIN_COUNT = 0
+LOSS_COUNT = 0
+TOTAL_TRADES = 0
+TRADE_HISTORY = []           # historial de resultados (para aprendizaje)
 
 MAX_DAILY_DRAWDOWN_PCT = 0.20
-PAPER_DAILY_START_BALANCE = PAPER_BALANCE_INICIAL
-PAPER_STOPPED_TODAY = False
-PAPER_CURRENT_DAY = None
+DAILY_START_BALANCE = None
+STOPPED_TODAY = False
+CURRENT_DAY = None
 
-ULTIMO_APRENDIZAJE, ULTIMO_PROFIT_FACTOR = 0, 1.0
+ULTIMO_APRENDIZAJE = 0
+ULTIMO_PROFIT_FACTOR = 1.0
 REGLAS_APRENDIDAS = "Aún no hay lecciones. Busca confluencia."
 TOKENS_ACUMULADOS = 0
+
+# =================== FUNCIONES DE BYBIT (REAL) ===================
+def set_leverage():
+    """Configura el apalancamiento en Bybit para el símbolo."""
+    try:
+        session.set_leverage(category="linear", symbol=SYMBOL, buyLeverage=str(LEVERAGE), sellLeverage=str(LEVERAGE))
+        print(f"✅ Apalancamiento {LEVERAGE}x configurado para {SYMBOL}")
+    except Exception as e:
+        print(f"⚠️ No se pudo configurar apalancamiento: {e}")
+
+def get_real_balance():
+    """Obtiene el saldo disponible USDT de la cuenta de trading linear."""
+    try:
+        resp = session.get_wallet_balance(accountType="UNIFIED", coin="USDT")
+        balance = float(resp['result']['list'][0]['coin'][0]['walletBalance'])
+        return balance
+    except Exception as e:
+        print(f"❌ Error obteniendo saldo real: {e}")
+        return None
+
+def place_market_order(side, qty):
+    """Coloca una orden market (compra/venta) y devuelve el ID de orden."""
+    try:
+        order = session.place_order(
+            category="linear",
+            symbol=SYMBOL,
+            side=side.capitalize(),
+            orderType="Market",
+            qty=str(qty),
+            timeInForce="GTC"
+        )
+        return order['result']['orderId']
+    except Exception as e:
+        print(f"❌ Error en orden market {side}: {e}")
+        return None
+
+def get_position_info():
+    """Obtiene la posición actual abierta para BTCUSDT."""
+    try:
+        resp = session.get_positions(category="linear", symbol=SYMBOL)
+        for p in resp['result']['list']:
+            if float(p['size']) != 0:
+                return {
+                    "size": float(p['size']),
+                    "entry_price": float(p['avgPrice']),
+                    "side": "Buy" if p['side'] == "Buy" else "Sell",
+                    "unrealised_pnl": float(p['unrealisedPnl'])
+                }
+        return None
+    except Exception as e:
+        print(f"❌ Error obteniendo posición: {e}")
+        return None
+
+def close_position_qty(qty, side_to_close):
+    """Cierra una cantidad específica de la posición (market). side_to_close = 'Buy' o 'Sell' (cierre opuesto)."""
+    try:
+        # Si la posición es long (Buy), para cerrar hay que vender (Sell)
+        close_side = "Sell" if side_to_close == "Buy" else "Buy"
+        order = session.place_order(
+            category="linear",
+            symbol=SYMBOL,
+            side=close_side,
+            orderType="Market",
+            qty=str(abs(qty)),
+            timeInForce="GTC",
+            reduceOnly=True
+        )
+        return order['result']['orderId']
+    except Exception as e:
+        print(f"❌ Error cerrando {qty} de posición {side_to_close}: {e}")
+        return None
 
 # =================== COMUNICACIÓN TELEGRAM ===================
 def telegram_mensaje(texto):
@@ -135,19 +223,22 @@ def telegram_enviar_imagen(ruta_imagen, caption=""):
     except Exception as e: print(f"Error imagen Telegram: {e}")
 
 def reporte_estado():
-    pnl_global = PAPER_BALANCE - PAPER_BALANCE_INICIAL
-    winrate = (PAPER_WIN / PAPER_TRADES_TOTALES * 100) if PAPER_TRADES_TOTALES > 0 else 0
+    global REAL_BALANCE
+    if REAL_BALANCE is None:
+        REAL_BALANCE = get_real_balance()
+    pnl_global = REAL_BALANCE - (DAILY_START_BALANCE or REAL_BALANCE)
+    winrate = (WIN_COUNT / TOTAL_TRADES * 100) if TOTAL_TRADES > 0 else 0
     mensaje = (
-        f"📊 **ESTADO DEL BOT**\n"
-        f"💰 Balance: {PAPER_BALANCE:.2f} USDT\n"
-        f"📈 PnL: {pnl_global:+.2f} USDT\n"
+        f"📊 **ESTADO DEL BOT REAL**\n"
+        f"💰 Balance: {REAL_BALANCE:.2f} USDT\n"
+        f"📈 PnL día: {pnl_global:+.2f} USDT\n"
         f"🎯 Winrate: {winrate:.1f}%\n"
-        f"⚡ Activos: {len(PAPER_ACTIVE_TRADES)}\n"
+        f"⚡ Activos: {len(REAL_ACTIVE_TRADES)}\n"
         f"📐 PF (10t): {ULTIMO_PROFIT_FACTOR:.2f}"
     )
     telegram_mensaje(mensaje)
 
-# =================== INDICADORES Y ZONAS ===================
+# =================== INDICADORES Y ZONAS (sin cambios) ===================
 def obtener_velas(limit=150):
     try:
         r = requests.get(f"{BASE_URL}/v5/market/kline", params={"category": "linear", "symbol": SYMBOL, "interval": INTERVAL, "limit": limit}, timeout=20)
@@ -185,7 +276,6 @@ def detectar_zonas_mercado(df, idx=-2):
     micro = 'SUBIENDO' if micro_slope > 0.2 else 'CAYENDO' if micro_slope < -0.2 else 'LATERAL'
     return soporte, resistencia, slope, intercept, tend, micro
 
-# =================== ANATOMÍA Y PATRONES (NISON) ===================
 def analizar_anatomia_vela(v):
     rango = v['high'] - v['low']
     if rango == 0: return "Doji Plano"
@@ -218,10 +308,10 @@ PATRONES: {analizar_patrones_conjuntos(df, idx)}
 """
     return desc, v['atr']
 
-# =================== VISIÓN IA Y GRÁFICOS ===================
+# =================== VISIÓN IA Y GRÁFICOS (sin cambios) ===================
 def generar_grafico_para_vision(df, soporte, resistencia, slope, intercept, precio):
     df_plot = df.tail(GRAFICO_VELAS_LIMIT).copy()
-    fig, ax = plt.subplots(figsize=(16,8))  # <--- LÍNEA CORREGIDA (antes estaba duplicada)
+    fig, ax = plt.subplots(figsize=(16,8))
     x = np.arange(len(df_plot))
     for i in range(len(df_plot)):
         o, h, l, c = df_plot['open'].iloc[i], df_plot['high'].iloc[i], df_plot['low'].iloc[i], df_plot['close'].iloc[i]
@@ -277,98 +367,189 @@ MEMORIA: {reglas}
         print(f"❌ Error en llamada a IA: {e}")
         return "Hold", "Error API", 0, 0, 0, "EMA20"
 
-# =================== GESTIÓN EJECUCIÓN ===================
-def paper_abrir_posicion(decision, precio, atr, razon, sl_ia, tp1_ia, tp2_ia, logic_ia, df, sop, res, slo, inter):
-    global PAPER_BALANCE, TRADE_COUNTER
-    if len(PAPER_ACTIVE_TRADES) >= MAX_CONCURRENT_TRADES: return
-    
+# =================== GESTIÓN REAL ===================
+def real_abrir_posicion(decision, precio, atr, razon, sl_ia, tp1_ia, tp2_ia, logic_ia, df, sop, res, slo, inter):
+    global REAL_BALANCE, TRADE_COUNTER, REAL_ACTIVE_TRADES, TOTAL_TRADES
+    if len(REAL_ACTIVE_TRADES) >= MAX_CONCURRENT_TRADES:
+        print("⚠️ Máximo de trades concurrentes alcanzado. No se abre nueva posición.")
+        return
+
+    if REAL_BALANCE is None:
+        REAL_BALANCE = get_real_balance()
+        if REAL_BALANCE is None:
+            print("❌ No se pudo obtener saldo real. Abortando apertura.")
+            return
+
+    # Calcular tamaño de la operación (basado en riesgo)
     sl_final = float(sl_ia) if sl_ia else (precio - atr*1.5 if decision=="Buy" else precio + atr*1.5)
-    if decision == "Buy" and sl_final >= precio: sl_final = precio - atr
-    if decision == "Sell" and sl_final <= precio: sl_final = precio + atr
+    if decision == "Buy" and sl_final >= precio:
+        sl_final = precio - atr
+    if decision == "Sell" and sl_final <= precio:
+        sl_final = precio + atr
 
     distancia = abs(precio - sl_final)
-    size_btc = (PAPER_BALANCE * RISK_PER_TRADE) / distancia
-    size_btc = min(size_btc, (PAPER_BALANCE * LEVERAGE) / precio)
+    risk_amount = REAL_BALANCE * RISK_PER_TRADE
+    qty_btc = risk_amount / distancia
+    # Limitar por apalancamiento (margen requerido)
+    max_qty = (REAL_BALANCE * LEVERAGE) / precio
+    qty_btc = min(qty_btc, max_qty)
+    if qty_btc <= 0:
+        print("⚠️ Cantidad a operar demasiado pequeña. Abortando.")
+        return
 
+    # Redondear a 3 decimales (BTCUSDT)
+    qty_btc = round(qty_btc, 3)
+    if qty_btc < 0.001:
+        print("⚠️ Cantidad mínima no alcanzada (0.001 BTC). Abortando.")
+        return
+
+    # Colocar orden market
+    order_id = place_market_order(decision, qty_btc)
+    if not order_id:
+        print("❌ No se pudo abrir la orden. Abortando.")
+        return
+
+    # Registrar operación activa
     TRADE_COUNTER += 1
     t = {
-        "id": TRADE_COUNTER, "decision": decision, "entrada": precio, "sl_inicial": sl_final, "sl_actual": sl_final,
-        "tp1": tp1_ia, "tp2": tp2_ia, "trailing_logic": logic_ia, "size_btc": size_btc,
-        "tp1_ejecutado": False, "tp2_ejecutado": False, "pnl_parcial": 0.0, "razon": razon
+        "id": TRADE_COUNTER,
+        "decision": decision,
+        "entrada": precio,
+        "sl_inicial": sl_final,
+        "sl_actual": sl_final,
+        "tp1": tp1_ia,
+        "tp2": tp2_ia,
+        "trailing_logic": logic_ia,
+        "qty_original": qty_btc,
+        "qty_restante": qty_btc,
+        "tp1_ejecutado": False,
+        "tp2_ejecutado": False,
+        "pnl_parcial": 0.0,
+        "razon": razon,
+        "order_id": order_id
     }
-    PAPER_ACTIVE_TRADES[TRADE_COUNTER] = t
-    msg = f"🚀 [#{TRADE_COUNTER}] {decision} en {precio:.2f}\nRazon: {razon}"
-    print(f"📈 {msg}")
+    REAL_ACTIVE_TRADES[TRADE_COUNTER] = t
+    msg = f"🚀 [#{TRADE_COUNTER}] {decision} REAL en {precio:.2f} | Qty {qty_btc} BTC\nRazon: {razon}"
+    print(msg)
     telegram_mensaje(msg)
     # Gráfico simple para Telegram
-    fig, ax = plt.subplots(); ax.plot(df.tail(20)['close'].values); plt.savefig("/tmp/in.png"); plt.close()
+    fig, ax = plt.subplots()
+    ax.plot(df.tail(20)['close'].values)
+    plt.savefig("/tmp/in.png")
+    plt.close()
     telegram_enviar_imagen("/tmp/in.png", msg)
 
-def paper_revisar_sl_tp(df):
-    global PAPER_BALANCE, PAPER_WIN, PAPER_LOSS, PAPER_TRADES_TOTALES, TRADE_HISTORY
-    if not PAPER_ACTIVE_TRADES: return
-    c, h, l = df['close'].iloc[-1], df['high'].iloc[-1], df['low'].iloc[-1]
-    ema, atr = df['ema20'].iloc[-1], df['atr'].iloc[-1]
-    h_prev, l_prev = df['high'].iloc[-2], df['low'].iloc[-2]
-    
+def real_revisar_sl_tp(df):
+    global REAL_BALANCE, WIN_COUNT, LOSS_COUNT, TOTAL_TRADES, TRADE_HISTORY, REAL_ACTIVE_TRADES
+    if not REAL_ACTIVE_TRADES:
+        return
+
+    c = df['close'].iloc[-1]
+    h = df['high'].iloc[-1]
+    l = df['low'].iloc[-1]
+    ema = df['ema20'].iloc[-1]
+    atr = df['atr'].iloc[-1]
+    h_prev = df['high'].iloc[-2]
+    l_prev = df['low'].iloc[-2]
+
     cerrar_ids = []
-    for tid, t in PAPER_ACTIVE_TRADES.items():
+    for tid, t in list(REAL_ACTIVE_TRADES.items()):
         # TP1 (50%)
-        if not t['tp1_ejecutado'] and t['tp1']:
-            if (t['decision']=="Buy" and h>=t['tp1']) or (t['decision']=="Sell" and l<=t['tp1']):
-                ganancia = abs(t['tp1'] - t['entrada']) * (t['size_btc'] * PCT_TP1)
-                t['pnl_parcial'] += ganancia
-                PAPER_BALANCE += ganancia
-                t['tp1_ejecutado'] = True
-                t['sl_actual'] = t['entrada']
-                print(f"🎯 TP1 alcanzado en trade #{tid}")
-                telegram_mensaje(f"🎯 TP1 #{tid} hit. SL a Breakeven.")
-        
+        if not t['tp1_ejecutado'] and t['tp1'] is not None and t['tp1'] > 0:
+            if (t['decision']=="Buy" and h >= t['tp1']) or (t['decision']=="Sell" and l <= t['tp1']):
+                qty_cerrar = t['qty_original'] * PCT_TP1
+                qty_cerrar = round(qty_cerrar, 3)
+                if qty_cerrar > 0 and qty_cerrar <= t['qty_restante']:
+                    order_id = close_position_qty(qty_cerrar, t['decision'])
+                    if order_id:
+                        # Calcular ganancia aproximada
+                        ganancia = abs(t['tp1'] - t['entrada']) * qty_cerrar
+                        t['pnl_parcial'] += ganancia
+                        REAL_BALANCE = get_real_balance()  # actualizar desde exchange
+                        t['qty_restante'] -= qty_cerrar
+                        t['tp1_ejecutado'] = True
+                        # Mover SL a breakeven
+                        t['sl_actual'] = t['entrada']
+                        print(f"🎯 TP1 real alcanzado en trade #{tid} (+{ganancia:.2f} USDT)")
+                        telegram_mensaje(f"🎯 TP1 #{tid} hit. SL a breakeven.")
+                    else:
+                        print(f"❌ Falló cierre TP1 para #{tid}")
+
         # TP2 (30%)
-        if t['tp1_ejecutado'] and not t['tp2_ejecutado'] and t['tp2']:
-            if (t['decision']=="Buy" and h>=t['tp2']) or (t['decision']=="Sell" and l<=t['tp2']):
-                ganancia = abs(t['tp2'] - t['entrada']) * (t['size_btc'] * PCT_TP2)
-                t['pnl_parcial'] += ganancia
-                PAPER_BALANCE += ganancia
-                t['tp2_ejecutado'] = True
-                print(f"🎯 TP2 alcanzado en trade #{tid}")
-                telegram_mensaje(f"🎯 TP2 #{tid} hit.")
+        if t['tp1_ejecutado'] and not t['tp2_ejecutado'] and t['tp2'] is not None and t['tp2'] > 0:
+            if (t['decision']=="Buy" and h >= t['tp2']) or (t['decision']=="Sell" and l <= t['tp2']):
+                qty_cerrar = t['qty_original'] * PCT_TP2
+                qty_cerrar = round(qty_cerrar, 3)
+                if qty_cerrar > 0 and qty_cerrar <= t['qty_restante']:
+                    order_id = close_position_qty(qty_cerrar, t['decision'])
+                    if order_id:
+                        ganancia = abs(t['tp2'] - t['entrada']) * qty_cerrar
+                        t['pnl_parcial'] += ganancia
+                        REAL_BALANCE = get_real_balance()
+                        t['qty_restante'] -= qty_cerrar
+                        t['tp2_ejecutado'] = True
+                        print(f"🎯 TP2 real alcanzado en trade #{tid} (+{ganancia:.2f} USDT)")
+                        telegram_mensaje(f"🎯 TP2 #{tid} hit.")
+                    else:
+                        print(f"❌ Falló cierre TP2 para #{tid}")
 
         # Trailing / SL
-        cerrar, motivo = False, ""
+        cerrar = False
+        motivo = ""
         if t['tp1_ejecutado']:
+            # Actualizar trailing
+            if t['trailing_logic'] == "EMA20":
+                nuevo_sl = ema - (atr*0.2) if t['decision']=="Buy" else ema + (atr*0.2)
+            else:  # LOW_CANDLE
+                nuevo_sl = l_prev if t['decision']=="Buy" else h_prev
             if t['decision']=="Buy":
-                t['sl_actual'] = max(t['sl_actual'], ema-(atr*0.2) if t['trailing_logic']=="EMA20" else l_prev)
-                if l <= t['sl_actual']: cerrar, motivo = True, "Trailing"
+                if nuevo_sl > t['sl_actual']:
+                    t['sl_actual'] = nuevo_sl
+                if l <= t['sl_actual']:
+                    cerrar, motivo = True, "Trailing"
             else:
-                t['sl_actual'] = min(t['sl_actual'], ema+(atr*0.2) if t['trailing_logic']=="EMA20" else h_prev)
-                if h >= t['sl_actual']: cerrar, motivo = True, "Trailing"
+                if nuevo_sl < t['sl_actual']:
+                    t['sl_actual'] = nuevo_sl
+                if h >= t['sl_actual']:
+                    cerrar, motivo = True, "Trailing"
         else:
+            # Stop loss inicial
             if (t['decision']=="Buy" and l <= t['sl_inicial']) or (t['decision']=="Sell" and h >= t['sl_inicial']):
                 cerrar, motivo = True, "Stop Loss"
 
         if cerrar:
-            pct = 0.20 if t['tp2_ejecutado'] else (0.50 if t['tp1_ejecutado'] else 1.0)
-            pnl_f = (t['sl_actual']-t['entrada'])*t['size_btc']*pct if t['decision']=="Buy" else (t['entrada']-t['sl_actual'])*t['size_btc']*pct
-            pnl_t = t['pnl_parcial'] + pnl_f
-            PAPER_BALANCE += pnl_f
-            PAPER_TRADES_TOTALES += 1
-            if pnl_t > 0: PAPER_WIN += 1
-            else: PAPER_LOSS += 1
-            # Guardar trade convertido a tipos nativos
-            TRADE_HISTORY.append(convertir_serializable({
-                "pnl": pnl_t, "resultado_win": pnl_t > 0, "decision": t['decision'], "razon": t['razon']
-            }))
-            cerrar_ids.append(tid)
-            print(f"📤 CERRADO #{tid} ({motivo}) | PnL: {pnl_t:.2f} USDT | Balance: {PAPER_BALANCE:.2f}")
-            telegram_mensaje(f"📤 CERRADO #{tid} ({motivo}). PnL: {pnl_t:.2f} USDT")
-            reporte_estado()
+            # Cerrar la cantidad restante
+            if t['qty_restante'] > 0:
+                order_id = close_position_qty(t['qty_restante'], t['decision'])
+                if order_id:
+                    # Calcular PnL final (incluyendo parciales)
+                    pnl_resto = (t['sl_actual'] - t['entrada']) * t['qty_restante'] if t['decision']=="Buy" else (t['entrada'] - t['sl_actual']) * t['qty_restante']
+                    pnl_total = t['pnl_parcial'] + pnl_resto
+                    REAL_BALANCE = get_real_balance()
+                    TOTAL_TRADES += 1
+                    if pnl_total > 0:
+                        WIN_COUNT += 1
+                    else:
+                        LOSS_COUNT += 1
+                    TRADE_HISTORY.append(convertir_serializable({
+                        "pnl": pnl_total, "resultado_win": pnl_total > 0, "decision": t['decision'], "razon": t['razon']
+                    }))
+                    cerrar_ids.append(tid)
+                    print(f"📤 CERRADO #{tid} ({motivo}) | PnL: {pnl_total:.2f} USDT | Balance: {REAL_BALANCE:.2f}")
+                    telegram_mensaje(f"📤 CERRADO #{tid} ({motivo}). PnL: {pnl_total:.2f} USDT")
+                    reporte_estado()
+                else:
+                    print(f"❌ Falló cierre final para #{tid}")
 
-    for tid in cerrar_ids: del PAPER_ACTIVE_TRADES[tid]
+    # Eliminar trades cerrados
+    for tid in cerrar_ids:
+        del REAL_ACTIVE_TRADES[tid]
+
+    # Aprendizaje cada 10 trades
     if len(TRADE_HISTORY) > 0 and len(TRADE_HISTORY) % 10 == 0:
         aprender_de_trades()
 
-# =================== AUTOAPRENDIZAJE Y LOOP ===================
+# =================== AUTOAPRENDIZAJE (sin cambios) ===================
 def aprender_de_trades():
     global REGLAS_APRENDIDAS, ULTIMO_APRENDIZAJE, ULTIMO_PROFIT_FACTOR
     try:
@@ -376,33 +557,47 @@ def aprender_de_trades():
         gan = sum(t['pnl'] for t in ult if t['pnl']>0)
         per = abs(sum(t['pnl'] for t in ult if t['pnl']<0))
         ULTIMO_PROFIT_FACTOR = gan/per if per>0 else 1.0
-        # Convertir a serializable antes del json.dumps
         ult_serial = convertir_serializable(ult)
-        prompt = f"Analiza estos 10 trades y dame una lección corta: {json.dumps(ult_serial)}"
+        prompt = f"Analiza estos 10 trades reales y dame una lección corta: {json.dumps(ult_serial)}"
         resp = client.chat.completions.create(model=MODELO_VISION, messages=[{"role":"user","content":prompt}])
         REGLAS_APRENDIDAS = resp.choices[0].message.content
         print(f"🧠 APRENDIZAJE: {REGLAS_APRENDIDAS}")
         telegram_mensaje(f"🧠 APRENDIZAJE: {REGLAS_APRENDIDAS}")
-        ULTIMO_APRENDIZAJE = PAPER_TRADES_TOTALES
+        ULTIMO_APRENDIZAJE = TOTAL_TRADES
         guardar_memoria()
     except Exception as e:
-        print(f"❌ Error en aprendizaje (no afecta al trading): {e}")
+        print(f"❌ Error en aprendizaje: {e}")
 
+# =================== RISK MANAGEMENT DIARIO ===================
 def risk_management_check():
-    global PAPER_DAILY_START_BALANCE, PAPER_STOPPED_TODAY, PAPER_CURRENT_DAY
+    global DAILY_START_BALANCE, STOPPED_TODAY, CURRENT_DAY, REAL_BALANCE
     hoy = datetime.now(timezone.utc).date()
-    if PAPER_CURRENT_DAY != hoy:
-        PAPER_CURRENT_DAY, PAPER_DAILY_START_BALANCE, PAPER_STOPPED_TODAY = hoy, PAPER_BALANCE, False
-        print(f"📅 Nuevo día: {hoy}. Balance inicial: {PAPER_DAILY_START_BALANCE:.2f}")
-    if (PAPER_BALANCE - PAPER_DAILY_START_BALANCE) / PAPER_DAILY_START_BALANCE <= -MAX_DAILY_DRAWDOWN_PCT:
-        PAPER_STOPPED_TODAY = True
-        print(f"🚨 Drawdown diario superado ({MAX_DAILY_DRAWDOWN_PCT*100}%). Bot detenido hasta mañana.")
-    return not PAPER_STOPPED_TODAY
+    if CURRENT_DAY != hoy:
+        CURRENT_DAY = hoy
+        if REAL_BALANCE is None:
+            REAL_BALANCE = get_real_balance()
+        DAILY_START_BALANCE = REAL_BALANCE
+        STOPPED_TODAY = False
+        print(f"📅 Nuevo día: {hoy}. Balance inicial: {DAILY_START_BALANCE:.2f}")
+    if REAL_BALANCE is not None and DAILY_START_BALANCE is not None:
+        drawdown = (REAL_BALANCE - DAILY_START_BALANCE) / DAILY_START_BALANCE
+        if drawdown <= -MAX_DAILY_DRAWDOWN_PCT:
+            STOPPED_TODAY = True
+            print(f"🚨 Drawdown diario superado ({MAX_DAILY_DRAWDOWN_PCT*100}%). Operaciones detenidas hasta mañana.")
+    return not STOPPED_TODAY
 
+# =================== LOOP PRINCIPAL ===================
 def run_bot():
+    global REAL_BALANCE, ULTIMO_APRENDIZAJE, TOKENS_ACUMULADOS, ULTIMO_PROFIT_FACTOR, TRADE_HISTORY, REAL_ACTIVE_TRADES
     cargar_memoria()
-    print("🤖 BOT V99.43 INICIADO - Modo LOGS DETALLADOS + FIX JSON")
-    telegram_mensaje("🤖 Bot V99.43 Online - Estructural Visual")
+    set_leverage()
+    REAL_BALANCE = get_real_balance()
+    if REAL_BALANCE is None:
+        print("❌ No se pudo obtener el saldo real. Abortando.")
+        return
+    print(f"🤖 BOT REAL V99.43 INICIADO - Balance: {REAL_BALANCE:.2f} USDT - Apalancamiento {LEVERAGE}x")
+    telegram_mensaje(f"🤖 Bot Real Online - Balance: {REAL_BALANCE:.2f} USDT - Apalancamiento {LEVERAGE}x")
+
     ultima_vela = None
     iteracion = 0
     while True:
@@ -410,8 +605,7 @@ def run_bot():
             iteracion += 1
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             print(f"\n🔄 [{now_str}] Ciclo #{iteracion} - Iniciando...")
-            
-            # Obtener datos
+
             df_raw = obtener_velas()
             if df_raw.empty:
                 print("⚠️ No se pudieron obtener velas. Reintentando...")
@@ -422,54 +616,48 @@ def run_bot():
                 print("⚠️ DataFrame vacío tras indicadores. Reintentando...")
                 time.sleep(SLEEP_SECONDS)
                 continue
-            
+
             precio_actual = df['close'].iloc[-1]
-            print(f"📊 Precio actual: {precio_actual:.2f} | Trades activos: {len(PAPER_ACTIVE_TRADES)}/{MAX_CONCURRENT_TRADES} | Balance: {PAPER_BALANCE:.2f}")
-            
+            # Actualizar balance real periódicamente
+            REAL_BALANCE = get_real_balance()
+            print(f"📊 Precio: {precio_actual:.2f} | Trades activos: {len(REAL_ACTIVE_TRADES)}/{MAX_CONCURRENT_TRADES} | Balance: {REAL_BALANCE:.2f}")
+
             # Verificar nueva vela
             vela_c = df.index[-2]
             if ultima_vela is None:
                 ultima_vela = vela_c
                 print(f"🕯️ Vela base establecida: {vela_c}")
-            
-            # Condiciones para nuevo análisis
-            if len(PAPER_ACTIVE_TRADES) < MAX_CONCURRENT_TRADES and ultima_vela != vela_c:
-                print(f"🕯️ Nueva vela detectada: {vela_c} (anterior: {ultima_vela})")
-                print("🔍 Ejecutando análisis de mercado...")
-                sop, res, slo, inter, t, m = detectar_zonas_mercado(df)
-                desc, atr = generar_descripcion_nison(df)
-                print("🧠 Enviando gráfico a IA para decisión...")
-                img = generar_grafico_para_vision(df, sop, res, slo, inter, df['close'].iloc[-1])
-                dec, raz, sl, tp1, tp2, log = analizar_con_qwen(desc, atr, REGLAS_APRENDIDAS, img)
-                print(f"🤖 Decisión IA: {dec} | Razón: {raz[:60]}...")
-                
-                if dec in ["Buy","Sell"]:
-                    print(f"✅ IA sugiere operación {dec}. Verificando risk management...")
-                    if risk_management_check():
-                        print(f"🚀 Abriendo posición {dec}...")
-                        paper_abrir_posicion(dec, df['close'].iloc[-1], atr, raz, sl, tp1, tp2, log, df, sop, res, slo, inter)
+
+            # Abrir nueva operación si hay espacio y es nueva vela
+            if len(REAL_ACTIVE_TRADES) < MAX_CONCURRENT_TRADES and ultima_vela != vela_c:
+                if risk_management_check():
+                    print(f"🕯️ Nueva vela detectada. Analizando...")
+                    sop, res, slo, inter, t, m = detectar_zonas_mercado(df)
+                    desc, atr = generar_descripcion_nison(df)
+                    img = generar_grafico_para_vision(df, sop, res, slo, inter, precio_actual)
+                    dec, raz, sl, tp1, tp2, log = analizar_con_qwen(desc, atr, REGLAS_APRENDIDAS, img)
+                    print(f"🤖 Decisión IA: {dec}")
+                    if dec in ["Buy","Sell"]:
+                        real_abrir_posicion(dec, precio_actual, atr, raz, sl, tp1, tp2, log, df, sop, res, slo, inter)
                     else:
-                        print("⛔ Risk management bloqueó la operación (drawdown diario alcanzado).")
+                        print(f"⏸️ IA decidió HOLD. Motivo: {raz[:100]}")
                 else:
-                    print(f"⏸️ IA decidió HOLD. Motivo: {raz[:100] if raz else 'No especificado'}")
+                    print("⛔ Risk management bloqueó nuevas operaciones (drawdown diario).")
                 ultima_vela = vela_c
             elif ultima_vela == vela_c:
-                print("⏳ Misma vela, no se repite análisis. Esperando nueva vela...")
+                print("⏳ Misma vela, no se repite análisis.")
             else:
-                print(f"⏸️ Máximo de trades concurrentes alcanzado ({len(PAPER_ACTIVE_TRADES)}/{MAX_CONCURRENT_TRADES}). No se analiza nueva entrada.")
-            
-            # Revisar SL/TP de trades activos
-            if PAPER_ACTIVE_TRADES:
-                print("🔎 Revisando condiciones de SL/TP en trades activos...")
-                paper_revisar_sl_tp(df)
-            else:
-                print("💤 Sin trades activos en este momento.")
-            
-            # Mostrar resumen cada 10 ciclos (aprox 10 minutos)
+                print(f"⏸️ Máximo de trades alcanzado ({len(REAL_ACTIVE_TRADES)}/{MAX_CONCURRENT_TRADES})")
+
+            # Revisar condiciones de cierre
+            if REAL_ACTIVE_TRADES:
+                print("🔎 Revisando trades activos...")
+                real_revisar_sl_tp(df)
+
             if iteracion % 10 == 0:
-                winrate = (PAPER_WIN / PAPER_TRADES_TOTALES * 100) if PAPER_TRADES_TOTALES > 0 else 0
-                print(f"📈 RESUMEN [{now_str}]: Balance={PAPER_BALANCE:.2f} | Trades={PAPER_TRADES_TOTALES} | Winrate={winrate:.1f}% | PF={ULTIMO_PROFIT_FACTOR:.2f}")
-            
+                winrate = (WIN_COUNT / TOTAL_TRADES * 100) if TOTAL_TRADES > 0 else 0
+                print(f"📈 RESUMEN [{now_str}]: Balance={REAL_BALANCE:.2f} | Trades={TOTAL_TRADES} | Winrate={winrate:.1f}% | PF={ULTIMO_PROFIT_FACTOR:.2f}")
+
             time.sleep(SLEEP_SECONDS)
         except Exception as e:
             print(f"❌ ERROR CRÍTICO: {e}")
