@@ -1,4 +1,4 @@
-# BOT TRADING V99.43 – QWEN3-VL-32B-Instruct (EDICIÓN CORREGIDA CON LOGS BÁSICOS)
+# BOT TRADING V99.43 – QWEN3-VL-32B-Instruct (EDICIÓN COMPLETA CORREGIDA + LOGS DETALLADOS)
 # ==============================================================================
 import os, time, requests, json, numpy as np, pandas as pd
 from scipy.stats import linregress
@@ -101,7 +101,7 @@ SLEEP_SECONDS = 60
 GRAFICO_VELAS_LIMIT = 120
 MAX_CONCURRENT_TRADES = 3
 
-PCT_TP1, PCT_TP2 = 0.50, 0.30
+PCT_TP1, PCT_TP2 = 0.50, 0.30  # El 20% restante va a trailing
 
 PAPER_BALANCE_INICIAL = 100.0
 PAPER_BALANCE = PAPER_BALANCE_INICIAL
@@ -221,7 +221,7 @@ PATRONES: {analizar_patrones_conjuntos(df, idx)}
 # =================== VISIÓN IA Y GRÁFICOS ===================
 def generar_grafico_para_vision(df, soporte, resistencia, slope, intercept, precio):
     df_plot = df.tail(GRAFICO_VELAS_LIMIT).copy()
-    fig, ax = plt.subplots(figsize=(16,8))  # <--- LÍNEA CORREGIDA
+    fig, ax = plt.subplots(figsize=(16,8))  # <--- LÍNEA CORREGIDA (antes estaba duplicada)
     x = np.arange(len(df_plot))
     for i in range(len(df_plot)):
         o, h, l, c = df_plot['open'].iloc[i], df_plot['high'].iloc[i], df_plot['low'].iloc[i], df_plot['close'].iloc[i]
@@ -274,7 +274,7 @@ MEMORIA: {reglas}
         if not datos: return "Hold", "", 0, 0, 0, "EMA20"
         return datos.get("decision","Hold"), datos.get("razon",""), datos.get("sl_price"), datos.get("tp1_price"), datos.get("tp2_price"), datos.get("trailing_logic","EMA20")
     except Exception as e:
-        print(f"❌ Error API IA: {e}")
+        print(f"❌ Error en llamada a IA: {e}")
         return "Hold", "Error API", 0, 0, 0, "EMA20"
 
 # =================== GESTIÓN EJECUCIÓN ===================
@@ -300,6 +300,7 @@ def paper_abrir_posicion(decision, precio, atr, razon, sl_ia, tp1_ia, tp2_ia, lo
     msg = f"🚀 [#{TRADE_COUNTER}] {decision} en {precio:.2f}\nRazon: {razon}"
     print(f"📈 {msg}")
     telegram_mensaje(msg)
+    # Gráfico simple para Telegram
     fig, ax = plt.subplots(); ax.plot(df.tail(20)['close'].values); plt.savefig("/tmp/in.png"); plt.close()
     telegram_enviar_imagen("/tmp/in.png", msg)
 
@@ -320,7 +321,7 @@ def paper_revisar_sl_tp(df):
                 PAPER_BALANCE += ganancia
                 t['tp1_ejecutado'] = True
                 t['sl_actual'] = t['entrada']
-                print(f"🎯 TP1 trade #{tid}")
+                print(f"🎯 TP1 alcanzado en trade #{tid}")
                 telegram_mensaje(f"🎯 TP1 #{tid} hit. SL a Breakeven.")
         
         # TP2 (30%)
@@ -330,7 +331,7 @@ def paper_revisar_sl_tp(df):
                 t['pnl_parcial'] += ganancia
                 PAPER_BALANCE += ganancia
                 t['tp2_ejecutado'] = True
-                print(f"🎯 TP2 trade #{tid}")
+                print(f"🎯 TP2 alcanzado en trade #{tid}")
                 telegram_mensaje(f"🎯 TP2 #{tid} hit.")
 
         # Trailing / SL
@@ -359,7 +360,7 @@ def paper_revisar_sl_tp(df):
                 "pnl": pnl_t, "resultado_win": pnl_t > 0, "decision": t['decision'], "razon": t['razon']
             }))
             cerrar_ids.append(tid)
-            print(f"📤 CERRADO #{tid} ({motivo}) | PnL: {pnl_t:.2f} | Balance: {PAPER_BALANCE:.2f}")
+            print(f"📤 CERRADO #{tid} ({motivo}) | PnL: {pnl_t:.2f} USDT | Balance: {PAPER_BALANCE:.2f}")
             telegram_mensaje(f"📤 CERRADO #{tid} ({motivo}). PnL: {pnl_t:.2f} USDT")
             reporte_estado()
 
@@ -367,7 +368,7 @@ def paper_revisar_sl_tp(df):
     if len(TRADE_HISTORY) > 0 and len(TRADE_HISTORY) % 10 == 0:
         aprender_de_trades()
 
-# =================== AUTOAPRENDIZAJE ===================
+# =================== AUTOAPRENDIZAJE Y LOOP ===================
 def aprender_de_trades():
     global REGLAS_APRENDIDAS, ULTIMO_APRENDIZAJE, ULTIMO_PROFIT_FACTOR
     try:
@@ -375,7 +376,7 @@ def aprender_de_trades():
         gan = sum(t['pnl'] for t in ult if t['pnl']>0)
         per = abs(sum(t['pnl'] for t in ult if t['pnl']<0))
         ULTIMO_PROFIT_FACTOR = gan/per if per>0 else 1.0
-        # Convertir a serializable antes de json.dumps
+        # Convertir a serializable antes del json.dumps
         ult_serial = convertir_serializable(ult)
         prompt = f"Analiza estos 10 trades y dame una lección corta: {json.dumps(ult_serial)}"
         resp = client.chat.completions.create(model=MODELO_VISION, messages=[{"role":"user","content":prompt}])
@@ -385,7 +386,7 @@ def aprender_de_trades():
         ULTIMO_APRENDIZAJE = PAPER_TRADES_TOTALES
         guardar_memoria()
     except Exception as e:
-        print(f"❌ Error aprendizaje (no crítico): {e}")
+        print(f"❌ Error en aprendizaje (no afecta al trading): {e}")
 
 def risk_management_check():
     global PAPER_DAILY_START_BALANCE, PAPER_STOPPED_TODAY, PAPER_CURRENT_DAY
@@ -395,52 +396,85 @@ def risk_management_check():
         print(f"📅 Nuevo día: {hoy}. Balance inicial: {PAPER_DAILY_START_BALANCE:.2f}")
     if (PAPER_BALANCE - PAPER_DAILY_START_BALANCE) / PAPER_DAILY_START_BALANCE <= -MAX_DAILY_DRAWDOWN_PCT:
         PAPER_STOPPED_TODAY = True
-        print("🚨 Drawdown diario superado. Bot detenido hasta mañana.")
+        print(f"🚨 Drawdown diario superado ({MAX_DAILY_DRAWDOWN_PCT*100}%). Bot detenido hasta mañana.")
     return not PAPER_STOPPED_TODAY
 
 def run_bot():
     cargar_memoria()
-    print("🤖 BOT V99.43 INICIADO (con logs en consola)")
+    print("🤖 BOT V99.43 INICIADO - Modo LOGS DETALLADOS + FIX JSON")
     telegram_mensaje("🤖 Bot V99.43 Online - Estructural Visual")
     ultima_vela = None
+    iteracion = 0
     while True:
         try:
-            df = calcular_indicadores(obtener_velas())
+            iteracion += 1
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"\n🔄 [{now_str}] Ciclo #{iteracion} - Iniciando...")
+            
+            # Obtener datos
+            df_raw = obtener_velas()
+            if df_raw.empty:
+                print("⚠️ No se pudieron obtener velas. Reintentando...")
+                time.sleep(SLEEP_SECONDS)
+                continue
+            df = calcular_indicadores(df_raw)
             if df.empty:
-                print("⚠️ Sin datos, reintentando...")
+                print("⚠️ DataFrame vacío tras indicadores. Reintentando...")
                 time.sleep(SLEEP_SECONDS)
                 continue
             
-            precio = df['close'].iloc[-1]
-            print(f"📊 {datetime.now().strftime('%H:%M:%S')} | Precio: {precio:.2f} | Activos: {len(PAPER_ACTIVE_TRADES)} | Balance: {PAPER_BALANCE:.2f}")
+            precio_actual = df['close'].iloc[-1]
+            print(f"📊 Precio actual: {precio_actual:.2f} | Trades activos: {len(PAPER_ACTIVE_TRADES)}/{MAX_CONCURRENT_TRADES} | Balance: {PAPER_BALANCE:.2f}")
             
+            # Verificar nueva vela
             vela_c = df.index[-2]
             if ultima_vela is None:
                 ultima_vela = vela_c
-                print(f"🕯️ Vela base: {vela_c}")
+                print(f"🕯️ Vela base establecida: {vela_c}")
             
+            # Condiciones para nuevo análisis
             if len(PAPER_ACTIVE_TRADES) < MAX_CONCURRENT_TRADES and ultima_vela != vela_c:
-                print(f"🕯️ Nueva vela {vela_c} -> analizando...")
+                print(f"🕯️ Nueva vela detectada: {vela_c} (anterior: {ultima_vela})")
+                print("🔍 Ejecutando análisis de mercado...")
                 sop, res, slo, inter, t, m = detectar_zonas_mercado(df)
                 desc, atr = generar_descripcion_nison(df)
-                img = generar_grafico_para_vision(df, sop, res, slo, inter, precio)
+                print("🧠 Enviando gráfico a IA para decisión...")
+                img = generar_grafico_para_vision(df, sop, res, slo, inter, df['close'].iloc[-1])
                 dec, raz, sl, tp1, tp2, log = analizar_con_qwen(desc, atr, REGLAS_APRENDIDAS, img)
-                print(f"🤖 IA: {dec} - {raz[:80]}")
-                if dec in ["Buy","Sell"] and risk_management_check():
-                    paper_abrir_posicion(dec, precio, atr, raz, sl, tp1, tp2, log, df, sop, res, slo, inter)
-                ultima_vela = vela_c
-            else:
-                if ultima_vela == vela_c:
-                    print("⏳ Misma vela, esperando...")
+                print(f"🤖 Decisión IA: {dec} | Razón: {raz[:60]}...")
+                
+                if dec in ["Buy","Sell"]:
+                    print(f"✅ IA sugiere operación {dec}. Verificando risk management...")
+                    if risk_management_check():
+                        print(f"🚀 Abriendo posición {dec}...")
+                        paper_abrir_posicion(dec, df['close'].iloc[-1], atr, raz, sl, tp1, tp2, log, df, sop, res, slo, inter)
+                    else:
+                        print("⛔ Risk management bloqueó la operación (drawdown diario alcanzado).")
                 else:
-                    print(f"⏸️ Máx trades alcanzado ({len(PAPER_ACTIVE_TRADES)}/{MAX_CONCURRENT_TRADES})")
+                    print(f"⏸️ IA decidió HOLD. Motivo: {raz[:100] if raz else 'No especificado'}")
+                ultima_vela = vela_c
+            elif ultima_vela == vela_c:
+                print("⏳ Misma vela, no se repite análisis. Esperando nueva vela...")
+            else:
+                print(f"⏸️ Máximo de trades concurrentes alcanzado ({len(PAPER_ACTIVE_TRADES)}/{MAX_CONCURRENT_TRADES}). No se analiza nueva entrada.")
             
+            # Revisar SL/TP de trades activos
             if PAPER_ACTIVE_TRADES:
+                print("🔎 Revisando condiciones de SL/TP en trades activos...")
                 paper_revisar_sl_tp(df)
+            else:
+                print("💤 Sin trades activos en este momento.")
+            
+            # Mostrar resumen cada 10 ciclos (aprox 10 minutos)
+            if iteracion % 10 == 0:
+                winrate = (PAPER_WIN / PAPER_TRADES_TOTALES * 100) if PAPER_TRADES_TOTALES > 0 else 0
+                print(f"📈 RESUMEN [{now_str}]: Balance={PAPER_BALANCE:.2f} | Trades={PAPER_TRADES_TOTALES} | Winrate={winrate:.1f}% | PF={ULTIMO_PROFIT_FACTOR:.2f}")
+            
             time.sleep(SLEEP_SECONDS)
         except Exception as e:
-            print(f"❌ ERROR: {e}")
-            import traceback; traceback.print_exc()
+            print(f"❌ ERROR CRÍTICO: {e}")
+            import traceback
+            traceback.print_exc()
             time.sleep(30)
 
 if __name__ == '__main__':
