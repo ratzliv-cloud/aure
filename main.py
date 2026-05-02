@@ -1,4 +1,4 @@
-# BOT TRADING REAL – Bybit + Qwen3-VL-32B-Instruct (EJECUCIÓN REAL, APALANCAMIENTO 10x)
+# BOT TRADING REAL – Bybit + Qwen3-VL-32B-Instruct (SIN pybit, SOLO REQUESTS)
 # ===================================================================================
 import os, time, requests, json, numpy as np, pandas as pd
 from scipy.stats import linregress
@@ -11,7 +11,8 @@ import io
 import json_repair
 import base64
 from openai import OpenAI
-from pybit.unified_trading import HTTP  # Para operar real en Bybit
+import hashlib
+import hmac
 
 # =================== CONFIGURACIÓN DE APIS ===================
 SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY")
@@ -25,14 +26,106 @@ MODELO_VISION = "Qwen/Qwen3-VL-32B-Instruct"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Bybit (real)
+# Bybit real (sin pybit)
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
 if not BYBIT_API_KEY or not BYBIT_API_SECRET:
     raise ValueError("Faltan BYBIT_API_KEY o BYBIT_API_SECRET")
 
-session = HTTP(testnet=False, api_key=BYBIT_API_KEY, api_secret=BYBIT_API_SECRET)
-BASE_URL = "https://api.bybit.com"  # solo para datos públicos (se sigue usando requests)
+# =================== FUNCIONES BYBIT CON REQUESTS ===================
+def bybit_request(endpoint, method="GET", params=None, body=None):
+    """Firma y envía solicitud privada a Bybit."""
+    timestamp = str(int(time.time() * 1000))
+    recv_window = "5000"
+    query_string = ""
+    if params:
+        query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+    if body:
+        body_str = json.dumps(body)
+        payload = timestamp + BYBIT_API_KEY + recv_window + body_str
+    else:
+        payload = timestamp + BYBIT_API_KEY + recv_window + query_string
+    signature = hmac.new(BYBIT_API_SECRET.encode('utf-8'), payload.encode('utf-8'), hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": BYBIT_API_KEY,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-SIGN": signature,
+        "Content-Type": "application/json"
+    }
+    url = f"https://api.bybit.com{endpoint}"
+    if method == "GET":
+        resp = requests.get(url, headers=headers, params=params)
+    else:
+        resp = requests.post(url, headers=headers, json=body)
+    return resp.json()
+
+def set_leverage():
+    """Configura apalancamiento en Bybit."""
+    try:
+        body = {"category": "linear", "symbol": "BTCUSDT", "buyLeverage": "10", "sellLeverage": "10"}
+        result = bybit_request("/v5/position/set-leverage", method="POST", body=body)
+        if result.get('retCode') == 0:
+            print("✅ Apalancamiento 10x configurado")
+        else:
+            print(f"⚠️ Error configurando apalancamiento: {result}")
+    except Exception as e:
+        print(f"❌ Excepción configurando apalancamiento: {e}")
+
+def get_real_balance():
+    """Obtiene saldo USDT disponible."""
+    try:
+        params = {"accountType": "UNIFIED", "coin": "USDT"}
+        result = bybit_request("/v5/account/wallet-balance", method="GET", params=params)
+        balance = float(result['result']['list'][0]['coin'][0]['walletBalance'])
+        return balance
+    except Exception as e:
+        print(f"❌ Error obteniendo saldo: {e}")
+        return None
+
+def place_market_order(side, qty):
+    """Coloca orden market real."""
+    try:
+        body = {
+            "category": "linear",
+            "symbol": "BTCUSDT",
+            "side": side.capitalize(),
+            "orderType": "Market",
+            "qty": str(qty),
+            "timeInForce": "GTC"
+        }
+        result = bybit_request("/v5/order/create", method="POST", body=body)
+        if result.get('retCode') == 0:
+            return result['result']['orderId']
+        else:
+            print(f"❌ Error orden market: {result}")
+            return None
+    except Exception as e:
+        print(f"❌ Excepción place_market_order: {e}")
+        return None
+
+def close_position_qty(qty, side_to_close):
+    """Cierra una cantidad de posición (reduce only)."""
+    try:
+        close_side = "Sell" if side_to_close == "Buy" else "Buy"
+        body = {
+            "category": "linear",
+            "symbol": "BTCUSDT",
+            "side": close_side,
+            "orderType": "Market",
+            "qty": str(abs(qty)),
+            "timeInForce": "GTC",
+            "reduceOnly": True
+        }
+        result = bybit_request("/v5/order/create", method="POST", body=body)
+        if result.get('retCode') == 0:
+            return result['result']['orderId']
+        else:
+            print(f"❌ Error close_position_qty: {result}")
+            return None
+    except Exception as e:
+        print(f"❌ Excepción close_position_qty: {e}")
+        return None
 
 # ====== MEMORIA PERSISTENTE ======
 MEMORY_FILE = "memoria_bot_real.json"
@@ -77,21 +170,20 @@ def guardar_memoria():
 
 def cargar_memoria():
     global TRADE_HISTORY, REGLAS_APRENDIDAS, REAL_BALANCE, WIN_COUNT, LOSS_COUNT
-    global TOTAL_TRADES, ULTIMO_APRENDIZAJE, TOKENS_ACUMULADOS, ULTIMO_PROFIT_FACTOR
+    global TOTAL_TRADES, ULTIMO_APRENDIZAJE, TOKENS_ACUMULADOS, ULTIMO_PROFIT_FACTOR, REAL_ACTIVE_TRADES
     if not os.path.exists(MEMORY_FILE): return
     try:
         with open(MEMORY_FILE, "r") as f:
             data = json.load(f)
         TRADE_HISTORY = data.get("TRADE_HISTORY", [])
         REGLAS_APRENDIDAS = data.get("REGLAS_APRENDIDAS", REGLAS_APRENDIDAS)
-        REAL_BALANCE = data.get("REAL_BALANCE", None)  # se actualizará desde el exchange
+        REAL_BALANCE = data.get("REAL_BALANCE", None)
         WIN_COUNT = data.get("WIN_COUNT", 0)
         LOSS_COUNT = data.get("LOSS_COUNT", 0)
         TOTAL_TRADES = data.get("TOTAL_TRADES", 0)
         ULTIMO_APRENDIZAJE = data.get("ULTIMO_APRENDIZAJE", 0)
         TOKENS_ACUMULADOS = data.get("TOKENS_ACUMULADOS", 0)
         ULTIMO_PROFIT_FACTOR = data.get("ULTIMO_PROFIT_FACTOR", 1.0)
-        # Restaurar operaciones activas
         active_meta = data.get("ACTIVE_TRADES_META", {})
         for tid, meta in active_meta.items():
             REAL_ACTIVE_TRADES[int(tid)] = meta
@@ -108,22 +200,21 @@ def parse_json_seguro(raw):
 # =================== CONFIGURACIÓN DEL BOT ===================
 SYMBOL = "BTCUSDT"
 INTERVAL = "5"
-RISK_PER_TRADE = 0.02      # 2% del capital por operación
+RISK_PER_TRADE = 0.02
 LEVERAGE = 10
 SLEEP_SECONDS = 60
 GRAFICO_VELAS_LIMIT = 120
-MAX_CONCURRENT_TRADES = 1   # En real, solo una posición simultánea para este símbolo
-
-PCT_TP1, PCT_TP2 = 0.50, 0.30   # 50% TP1, 30% TP2, 20% trailing
+MAX_CONCURRENT_TRADES = 1
+PCT_TP1, PCT_TP2 = 0.50, 0.30
 
 # Estado real
-REAL_BALANCE = None          # se obtendrá de Bybit
-REAL_ACTIVE_TRADES = {}      # trades activos reales
+REAL_BALANCE = None
+REAL_ACTIVE_TRADES = {}
 TRADE_COUNTER = 0
 WIN_COUNT = 0
 LOSS_COUNT = 0
 TOTAL_TRADES = 0
-TRADE_HISTORY = []           # historial de resultados (para aprendizaje)
+TRADE_HISTORY = []
 
 MAX_DAILY_DRAWDOWN_PCT = 0.20
 DAILY_START_BALANCE = None
@@ -134,77 +225,6 @@ ULTIMO_APRENDIZAJE = 0
 ULTIMO_PROFIT_FACTOR = 1.0
 REGLAS_APRENDIDAS = "Aún no hay lecciones. Busca confluencia."
 TOKENS_ACUMULADOS = 0
-
-# =================== FUNCIONES DE BYBIT (REAL) ===================
-def set_leverage():
-    """Configura el apalancamiento en Bybit para el símbolo."""
-    try:
-        session.set_leverage(category="linear", symbol=SYMBOL, buyLeverage=str(LEVERAGE), sellLeverage=str(LEVERAGE))
-        print(f"✅ Apalancamiento {LEVERAGE}x configurado para {SYMBOL}")
-    except Exception as e:
-        print(f"⚠️ No se pudo configurar apalancamiento: {e}")
-
-def get_real_balance():
-    """Obtiene el saldo disponible USDT de la cuenta de trading linear."""
-    try:
-        resp = session.get_wallet_balance(accountType="UNIFIED", coin="USDT")
-        balance = float(resp['result']['list'][0]['coin'][0]['walletBalance'])
-        return balance
-    except Exception as e:
-        print(f"❌ Error obteniendo saldo real: {e}")
-        return None
-
-def place_market_order(side, qty):
-    """Coloca una orden market (compra/venta) y devuelve el ID de orden."""
-    try:
-        order = session.place_order(
-            category="linear",
-            symbol=SYMBOL,
-            side=side.capitalize(),
-            orderType="Market",
-            qty=str(qty),
-            timeInForce="GTC"
-        )
-        return order['result']['orderId']
-    except Exception as e:
-        print(f"❌ Error en orden market {side}: {e}")
-        return None
-
-def get_position_info():
-    """Obtiene la posición actual abierta para BTCUSDT."""
-    try:
-        resp = session.get_positions(category="linear", symbol=SYMBOL)
-        for p in resp['result']['list']:
-            if float(p['size']) != 0:
-                return {
-                    "size": float(p['size']),
-                    "entry_price": float(p['avgPrice']),
-                    "side": "Buy" if p['side'] == "Buy" else "Sell",
-                    "unrealised_pnl": float(p['unrealisedPnl'])
-                }
-        return None
-    except Exception as e:
-        print(f"❌ Error obteniendo posición: {e}")
-        return None
-
-def close_position_qty(qty, side_to_close):
-    """Cierra una cantidad específica de la posición (market). side_to_close = 'Buy' o 'Sell' (cierre opuesto)."""
-    try:
-        # Si la posición es long (Buy), para cerrar hay que vender (Sell)
-        close_side = "Sell" if side_to_close == "Buy" else "Buy"
-        order = session.place_order(
-            category="linear",
-            symbol=SYMBOL,
-            side=close_side,
-            orderType="Market",
-            qty=str(abs(qty)),
-            timeInForce="GTC",
-            reduceOnly=True
-        )
-        return order['result']['orderId']
-    except Exception as e:
-        print(f"❌ Error cerrando {qty} de posición {side_to_close}: {e}")
-        return None
 
 # =================== COMUNICACIÓN TELEGRAM ===================
 def telegram_mensaje(texto):
@@ -238,10 +258,10 @@ def reporte_estado():
     )
     telegram_mensaje(mensaje)
 
-# =================== INDICADORES Y ZONAS (sin cambios) ===================
+# =================== INDICADORES Y ZONAS ===================
 def obtener_velas(limit=150):
     try:
-        r = requests.get(f"{BASE_URL}/v5/market/kline", params={"category": "linear", "symbol": SYMBOL, "interval": INTERVAL, "limit": limit}, timeout=20)
+        r = requests.get(f"https://api.bybit.com/v5/market/kline", params={"category": "linear", "symbol": SYMBOL, "interval": INTERVAL, "limit": limit}, timeout=20)
         data = r.json()
         if data.get("retCode") != 0: return pd.DataFrame()
         lista = data.get("result")["list"][::-1]
@@ -308,7 +328,7 @@ PATRONES: {analizar_patrones_conjuntos(df, idx)}
 """
     return desc, v['atr']
 
-# =================== VISIÓN IA Y GRÁFICOS (sin cambios) ===================
+# =================== VISIÓN IA Y GRÁFICOS ===================
 def generar_grafico_para_vision(df, soporte, resistencia, slope, intercept, precio):
     df_plot = df.tail(GRAFICO_VELAS_LIMIT).copy()
     fig, ax = plt.subplots(figsize=(16,8))
@@ -390,14 +410,12 @@ def real_abrir_posicion(decision, precio, atr, razon, sl_ia, tp1_ia, tp2_ia, log
     distancia = abs(precio - sl_final)
     risk_amount = REAL_BALANCE * RISK_PER_TRADE
     qty_btc = risk_amount / distancia
-    # Limitar por apalancamiento (margen requerido)
     max_qty = (REAL_BALANCE * LEVERAGE) / precio
     qty_btc = min(qty_btc, max_qty)
     if qty_btc <= 0:
         print("⚠️ Cantidad a operar demasiado pequeña. Abortando.")
         return
 
-    # Redondear a 3 decimales (BTCUSDT)
     qty_btc = round(qty_btc, 3)
     if qty_btc < 0.001:
         print("⚠️ Cantidad mínima no alcanzada (0.001 BTC). Abortando.")
@@ -462,14 +480,12 @@ def real_revisar_sl_tp(df):
                 if qty_cerrar > 0 and qty_cerrar <= t['qty_restante']:
                     order_id = close_position_qty(qty_cerrar, t['decision'])
                     if order_id:
-                        # Calcular ganancia aproximada
                         ganancia = abs(t['tp1'] - t['entrada']) * qty_cerrar
                         t['pnl_parcial'] += ganancia
-                        REAL_BALANCE = get_real_balance()  # actualizar desde exchange
+                        REAL_BALANCE = get_real_balance()
                         t['qty_restante'] -= qty_cerrar
                         t['tp1_ejecutado'] = True
-                        # Mover SL a breakeven
-                        t['sl_actual'] = t['entrada']
+                        t['sl_actual'] = t['entrada']  # breakeven
                         print(f"🎯 TP1 real alcanzado en trade #{tid} (+{ganancia:.2f} USDT)")
                         telegram_mensaje(f"🎯 TP1 #{tid} hit. SL a breakeven.")
                     else:
@@ -517,39 +533,34 @@ def real_revisar_sl_tp(df):
             if (t['decision']=="Buy" and l <= t['sl_inicial']) or (t['decision']=="Sell" and h >= t['sl_inicial']):
                 cerrar, motivo = True, "Stop Loss"
 
-        if cerrar:
-            # Cerrar la cantidad restante
-            if t['qty_restante'] > 0:
-                order_id = close_position_qty(t['qty_restante'], t['decision'])
-                if order_id:
-                    # Calcular PnL final (incluyendo parciales)
-                    pnl_resto = (t['sl_actual'] - t['entrada']) * t['qty_restante'] if t['decision']=="Buy" else (t['entrada'] - t['sl_actual']) * t['qty_restante']
-                    pnl_total = t['pnl_parcial'] + pnl_resto
-                    REAL_BALANCE = get_real_balance()
-                    TOTAL_TRADES += 1
-                    if pnl_total > 0:
-                        WIN_COUNT += 1
-                    else:
-                        LOSS_COUNT += 1
-                    TRADE_HISTORY.append(convertir_serializable({
-                        "pnl": pnl_total, "resultado_win": pnl_total > 0, "decision": t['decision'], "razon": t['razon']
-                    }))
-                    cerrar_ids.append(tid)
-                    print(f"📤 CERRADO #{tid} ({motivo}) | PnL: {pnl_total:.2f} USDT | Balance: {REAL_BALANCE:.2f}")
-                    telegram_mensaje(f"📤 CERRADO #{tid} ({motivo}). PnL: {pnl_total:.2f} USDT")
-                    reporte_estado()
+        if cerrar and t['qty_restante'] > 0:
+            order_id = close_position_qty(t['qty_restante'], t['decision'])
+            if order_id:
+                pnl_resto = (t['sl_actual'] - t['entrada']) * t['qty_restante'] if t['decision']=="Buy" else (t['entrada'] - t['sl_actual']) * t['qty_restante']
+                pnl_total = t['pnl_parcial'] + pnl_resto
+                REAL_BALANCE = get_real_balance()
+                TOTAL_TRADES += 1
+                if pnl_total > 0:
+                    WIN_COUNT += 1
                 else:
-                    print(f"❌ Falló cierre final para #{tid}")
+                    LOSS_COUNT += 1
+                TRADE_HISTORY.append(convertir_serializable({
+                    "pnl": pnl_total, "resultado_win": pnl_total > 0, "decision": t['decision'], "razon": t['razon']
+                }))
+                cerrar_ids.append(tid)
+                print(f"📤 CERRADO #{tid} ({motivo}) | PnL: {pnl_total:.2f} USDT | Balance: {REAL_BALANCE:.2f}")
+                telegram_mensaje(f"📤 CERRADO #{tid} ({motivo}). PnL: {pnl_total:.2f} USDT")
+                reporte_estado()
+            else:
+                print(f"❌ Falló cierre final para #{tid}")
 
-    # Eliminar trades cerrados
     for tid in cerrar_ids:
         del REAL_ACTIVE_TRADES[tid]
 
-    # Aprendizaje cada 10 trades
     if len(TRADE_HISTORY) > 0 and len(TRADE_HISTORY) % 10 == 0:
         aprender_de_trades()
 
-# =================== AUTOAPRENDIZAJE (sin cambios) ===================
+# =================== AUTOAPRENDIZAJE ===================
 def aprender_de_trades():
     global REGLAS_APRENDIDAS, ULTIMO_APRENDIZAJE, ULTIMO_PROFIT_FACTOR
     try:
@@ -618,7 +629,6 @@ def run_bot():
                 continue
 
             precio_actual = df['close'].iloc[-1]
-            # Actualizar balance real periódicamente
             REAL_BALANCE = get_real_balance()
             print(f"📊 Precio: {precio_actual:.2f} | Trades activos: {len(REAL_ACTIVE_TRADES)}/{MAX_CONCURRENT_TRADES} | Balance: {REAL_BALANCE:.2f}")
 
@@ -628,7 +638,6 @@ def run_bot():
                 ultima_vela = vela_c
                 print(f"🕯️ Vela base establecida: {vela_c}")
 
-            # Abrir nueva operación si hay espacio y es nueva vela
             if len(REAL_ACTIVE_TRADES) < MAX_CONCURRENT_TRADES and ultima_vela != vela_c:
                 if risk_management_check():
                     print(f"🕯️ Nueva vela detectada. Analizando...")
