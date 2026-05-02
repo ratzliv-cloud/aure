@@ -1,4 +1,4 @@
-# BOT TRADING V99.43 – QWEN3-VL-32B-Instruct (EDICIÓN COMPLETA CORREGIDA + LOGS)
+# BOT TRADING V99.43 – QWEN3-VL-32B-Instruct (EDICIÓN COMPLETA CORREGIDA + LOGS + FIX JSON)
 # ==============================================================================
 import os, time, requests, json, numpy as np, pandas as pd
 from scipy.stats import linregress
@@ -219,258 +219,539 @@ PATRONES: {analizar_patrones_conjuntos(df, idx)}
 """
     return desc, v['atr']
 
-# =================== VISIÓN IA Y GRÁFICOS ===================
-def generar_grafico_para_vision(df, soporte, resistencia, slope, intercept, precio):
-    df_plot = df.tail(GRAFICO_VELAS_LIMIT).copy()
-    fig, ax = plt.subplots(figsize=(16,8))
-    x = np.arange(len(df_plot))
-    for i in range(len(df_plot)):
-        o, h, l, c = df_plot['open'].iloc[i], df_plot['high'].iloc[i], df_plot['low'].iloc[i], df_plot['close'].iloc[i]
-        color = '#00ff00' if c >= o else '#ff0000'
-        ax.vlines(x[i], l, h, color=color, linewidth=1.5)
-        ax.add_patch(plt.Rectangle((x[i]-0.35, min(o,c)), 0.7, max(abs(c-o), 0.1), color=color, alpha=0.9))
-    ax.axhline(soporte, color='cyan', ls='--', lw=2, label='Soporte')
-    ax.axhline(resistencia, color='magenta', ls='--', lw=2, label='Resistencia')
-    ax.plot(x, df_plot['ema20'], 'yellow', lw=2, label='EMA20')
-    ax.set_facecolor('#121212')
-    fig.patch.set_facecolor('#121212')
-    plt.tight_layout()
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=100)
-    buf.seek(0)
+# =================== VISIÓN IA Y GRÁFICOS ===================OS ===================
+def
+def generar_ generar_graficografico_para_vision_para_vision(df,(df, soporte soporte, resistencia, slope, intercept, precio, resistencia, slope, intercept, precio):
+   ):
+    df_plot = df.tail df_plot = df.tail(GRAFICO_V(GRAFICO_VELASELAS_LIMIT)._LIMIT).copycopy()
+    fig()
+    fig, ax = plt.subplots(fig, ax = plt.subplots(figsize=(16,8size=(16,8))
+    x = np))
+    x = np.arange(len(df_.arange(len(df_plot))
+    for i inplot))
+    for i in range(len range(len(df_plot)):
+        o(df_plot)):
+        o, h, l, h, l, c, c = df_plot = df_plot['open'].iloc[i], df_plot['high'].iloc[i], df_plot['open'].iloc[i], df_plot['high'].iloc[i], df_plot['low['low'].iloc[i], df'].iloc[i], df_plot_plot['close'].iloc[i['close'].iloc[i]
+        color = '#00ff00' if]
+        color = '#00ff00' if c >= c >= o else '#ff o else '#ff0000'
+        ax.v0000'
+        ax.vlines(x[i],lines(x[i], l, l, h, color= h, color=color,color, linewidth=1 linewidth.5)
+        ax.add=1.5)
+        ax.add_patch_patch(plt.Rect(plt.Rectangle((x[i]-0angle((x[i]-0.35, min(o,c.35, min(o,c)), 0.7,)), 0.7, max(abs(c-o),  max(abs(c-o), 0.1), color=0.1), color=color,color, alpha=0. alpha=0.9))
+    ax.ax9))
+    ax.axhline(soporte, colorhline(soporte, color='cyan', ls='cyan', ls='--='--', l', lw=2,w=2, label=' label='SoporteSoporte')
+    ax.ax')
+    ax.axhline(reshline(resistencia, coloristencia, color='mag='magenta', ls='enta', ls='--',--', lw=2 lw=2, label='Res, label='Resistenciaistencia')
+   ')
+    ax.plot(x, df_ ax.plot(x, df_plot['plot['ema20ema20'], 'yellow','], 'yellow', lw=2, label='EMA lw=2, label='EMA2020')
+    ax.set_')
+    ax.set_facecolorfacecolor('#121('#121212')
+    fig212')
+    fig.patch.set_.patch.set_facecolorfacecolor('#121212')
+    plt.tight('#121212')
+    plt_layout()
+    buf.tight_layout()
+    buf = io = io.BytesIO.BytesIO()
+    plt.savefig(buf,()
+    plt.savefig(buf, format='png', dpi format='png', dpi=100)
+   =100)
+    buf.se buf.seek(0ek(0)
+    img)
     img = Image.open(buf)
+    = Image.open(buf plt.close)
     plt.close()
-    return img
+   ()
+    return img return img
+
+def pil_to_base64
 
 def pil_to_base64(img):
+    buff(img):
     buffered = io.BytesIO()
-    img.save(buffered, format="PNG")
-    return f"data:image/png;base64,{base64.b64encode(buffered.getvalue()).decode()}"
+   ered = io.B img.save(buffered,ytesIO()
+    img.save(buffered, format=" format="PNGPNG")
+   ")
+    return f"data return f"data:image/png;base:image/png;base64,64,{base64.b{base64.b64encode(buffered.get64encode(buffered.getvalue()).decode()}value()).decode()}"
 
-def analizar_con_qwen(descripcion_texto, atr, reglas, imagen):
-    global TOKENS_ACUMULADOS
+def"
+
+def analizar_con_q analizar_con_qwen(wen(descripcion_texto,descripcion_texto, atr, reglas, atr, reglas, imagen imagen):
+    global TOKENS_):
+    global TOKENS_ACUMACUMULADOSULADOS
     try:
-        img_b64 = pil_to_base64(imagen)
-        prompt = f"""
-Eres Trader Senior. Mira el gráfico (Cian=Sop, Magenta=Res, Amarillo=EMA20).
-Define niveles VISUALES de salida. 
-1. sl_price: Invalidación real.
-2. tp1_price: Obstáculo cercano.
-3. tp2_price: Nivel de liquidez lejano.
-4. trailing_logic: "EMA20" o "LOW_CANDLE".
+        img_b64 =
+    try:
+        img_b64 = pil_to_base64 pil_to_base64(im(imagen)
+        promptagen)
+        prompt = f = f"""
+Eres Tra"""
+Eres Trader Seniorder Senior. Mira el gráfico (Cian=Sop. Mira el gráfico (Cian=Sop, Mag, Magenta=Res,enta=Res, Amarillo Amarillo=EMA20=EMA20).
+Define niveles VISUAL).
+Define niveles VISUALES deES de salida salida.. 
+1. 
+1. sl_price sl_price: Invalid: Invalidación real.
+2. tpación real.
+2. tp1_price: Obst1_price: Obstáculoáculo cercano.
+3 cercano.
+3. tp. tp2_price2_price: N: Nivel deivel de liquidez liquidez lejano.
+4. trailing_logic lejano.
+4. trailing_logic: ": "EMA20EMA20" o "LOW_C" o "LANDLEOW_CANDLE".
 
-JSON (una línea):
-{{"decision":"Buy/Sell/Hold","razon":"texto","sl_price":0.0,"tp1_price":0.0,"tp2_price":0.0,"trailing_logic":"EMA20/LOW_CANDLE"}}
+JSON".
 
-DATOS: {descripcion_texto}
-MEMORIA: {reglas}
+JSON (una línea (una):
+{{"decision":" línea):
+{{"Buy/Sell/Hdecision":"Buy/Sell/Hold","razonold","razon":"text":"texto","o","sl_pricesl_price":0.0":0.0,"tp1_price,"tp1_price":0.0,"tp2_price":0.0,"tp2_price":0":0.0,"trailing_logic.0,"trailing_logic":"EMA20/LOW_CANDLE":"EMA20/LOW_CANDLE""}}
+
+DATOS}}
+
+DATOS: {descrip: {descripcion_textcion_texto}
+MEMORo}
+MEMORIA:IA: {reg {reglas}
 """
-        response = client.chat.completions.create(
-            model=MODELO_VISION,
-            messages=[{"role":"user", "content":[{"type":"text","text":prompt}, {"type":"image_url","image_url":{"url":img_b64}}]}],
+        response =las}
+"""
+        response = client.ch client.chat.completionsat.com.createpletions.create(
+            model(
+            model=MODELO_VISION=MODELO_VISION,
+            messages=[{"role,
+            messages=[{"role":"user", "":"user", "contentcontent":[{"type":"text","text":prompt},":[{"type":"text","text":prompt}, {"type {"type":"image_url","image_url":"image_url","image_url":{"url":img_b64":{"url":img_b64}}}}]}],
+            temperature=]}],
             temperature=0.1
+       0.1
         )
-        TOKENS_ACUMULADOS += response.usage.total_tokens
-        datos = parse_json_seguro(response.choices[0].message.content)
-        if not datos: return "Hold", "", 0, 0, 0, "EMA20"
-        return datos.get("decision","Hold"), datos.get("razon",""), datos.get("sl_price"), datos.get("tp1_price"), datos.get("tp2_price"), datos.get("trailing_logic","EMA20")
-    except Exception as e:
-        print(f"❌ Error en llamada a IA: {e}")
-        return "Hold", "Error API", 0, 0, 0, "EMA20"
+        TOKENS_AC )
+        TOKENS_ACUMULADOS += responseUMULADOS += response.usage.usage.total_tokens.total_tokens
+        datos
+        datos = parse_json_se = parse_json_seguro(response.guro(response.choiceschoices[0].[0].message.content)
+       message.content)
+        if not if not datos: return " datosHold", "", 0, : return "Hold", "", 0, 0, 0, 0, "EMA200, "EMA20"
+        return datos.get("decision"
+        return datos.get("decision","Hold"), datos.get("","Hold"), datos.get("razon",""),razon",""), datos.get("sl_price"), datos.get("sl_price"), datos.get datos.get("tp("tp1_price1_price"), datos.get(""), datos.get("tp2tp2_price"), datos.get_price"), datos.get("trailing_logic("trailing_logic","EMA","EMA2020")
+    except")
+    except Exception as Exception as e:
+        print e:
+        print(f"❌ Error(f"❌ Error en en llamada a IA: { llamada a IA: {e}")
+        returne}")
+        return "Hold", "Error API",  "Hold", "Error API", 0, 00, 0, , 0, "EMA200, "EMA20"
 
-# =================== GESTIÓN EJECUCIÓN ===================
-def paper_abrir_posicion(decision, precio, atr, razon, sl_ia, tp1_ia, tp2_ia, logic_ia, df, sop, res, slo, inter):
-    global PAPER_BALANCE, TRADE_COUNTER
-    if len(PAPER_ACTIVE_TRADES) >= MAX_CONCURRENT_TRADES: return
+# ==================="
+
+# =================== GEST GESTIÓN EJECIÓN EJECUCIUCIÓN ===================ÓN ===================
+def
+def paper_abrir_posicion paper_abrir_posicion(decision, precio, atr, razon, sl(decision, precio, atr, razon, sl_ia, tp1__ia, tp1_ia, tp2_iaia, tp2_ia, logic_ia, logic, df, sop_ia, df, sop, res, slo, inter, res, slo, inter):
+    global):
+    global PAPER PAPER_BAL_BALANCE,ANCE, TRADE_COUN TRADE_COUNTERTER
+    if
+    if len(P len(PAPERAPER_ACT_ACTIVE_TRADESIVE_TR) >=ADES) >= MAX_CON MAX_CONCURRENTCURRENT_TRAD_TRADES: returnES: return
     
-    sl_final = float(sl_ia) if sl_ia else (precio - atr*1.5 if decision=="Buy" else precio + atr*1.5)
-    if decision == "Buy" and sl_final >= precio: sl_final = precio - atr
-    if decision == "Sell" and sl_final <= precio: sl_final = precio + atr
+    sl
+    
+    sl_final_final = float(sl_ia = float(sl_ia) if sl_) if sl_ia elseia else (pre (precio - atr*1.5 if decision=="Buy" else precio + atr*1.5)
+    if decision == "Buy" and sl_final >= precio: sl_final = preciocio - atr*1.5 if decision=="Buy" else precio + atr*1.5)
+    if decision == "Buy" and sl_final >= precio: sl_final = precio - at - atrr
+    if
+    if decision == decision == "Sell" "S and sl_finalell" and sl_final <= precio: sl <= precio: sl_final = precio_final = precio + at + atr
 
-    distancia = abs(precio - sl_final)
-    size_btc = (PAPER_BALANCE * RISK_PER_TRADE) / distancia
-    size_btc = min(size_btc, (PAPER_BALANCE * LEVERAGE) / precio)
+    distanciar
 
-    TRADE_COUNTER += 1
+    distancia = abs(precio - sl = abs(precio - sl_final)
+    size__final)
+    size_btc = (PAPbtc = (PAPER_BALANCEER_BALANCE * RIS * RISK_PER_TRADE) /K_PER_TRADE) / distancia
+    size_bt distancia
+    size_btc = min(size_btc = min(size_btc,c, (PAPER (PAPER_BALANCE * LEVER_BALANCE *AGE) / precio)
+
+    LEVERAGE) / precio)
+
+    TRADE_COUN TRADE_COUNTER +=TER += 1
+    t = 1
     t = {
-        "id": TRADE_COUNTER, "decision": decision, "entrada": precio, "sl_inicial": sl_final, "sl_actual": sl_final,
-        "tp1": tp1_ia, "tp2": tp2_ia, "trailing_logic": logic_ia, "size_btc": size_btc,
-        "tp1_ejecutado": False, "tp2_ejecutado": False, "pnl_parcial": 0.0, "razon": razon
+        "id {
+        "id": TR": TRADE_COUNTER, "ADE_COUNTER, "decision": decision, "entdecision": decision,rada": precio, "entrada": precio, "sl "sl_inicial": sl_final_inicial": sl, "sl_actual": sl_f_final, "sl_actual": sl_finalinal,
+        "tp1,
+        "tp1": tp": tp1_ia, "tp1_ia, "tp2": tp22": tp2_ia_ia, "trailing_logic":, "trailing_logic": logic_ia, "size logic_ia, "size_btc": size__btc": size_btcbtc,
+        "tp,
+        "tp1_e1_ejecjecutadoutado": False, "tp2": False, "tp2_ejecut_ejecutado":ado": False, False, "pnl_ "pnl_parcialparcial": 0.": 0.0,0, "razon": razon "razon": razon
     }
-    PAPER_ACTIVE_TRADES[TRADE_COUNTER] = t
-    msg = f"🚀 [#{TRADE_COUNTER}] {decision} en {precio:.2f}\nRazon: {razon}"
+    PAPER
+    }
+    PAPER_ACTIVE_TRADES_ACTIVE_TRADES[TRADE_COUNTER[TRADE_COUNTER] = t
+    msg = f] = t
+    msg = f""🚀 [#{TR🚀 [#{TRADE_COUNTERADE_CO}] {UNTER}] {decision}decision} en {precio:.2 en {precio:.2f}\nRf}\nRazon:azon: {razon {razon}"
+    print(f"📈 {msg}"
     print(f"📈 {msg}")
     telegram_mensaje(msg)
     # Generar gráfico simple para Telegram
-    fig, ax = plt.subplots(); ax.plot(df.tail(20)['close'].values); plt.savefig("/tmp/in.png"); plt.close()
-    telegram_enviar_imagen("/tmp/in.png", msg)
+    fig, ax = plt.subplots(); ax.plot(df.tail(20)['close}")
+    telegram_mensaje(msg)
+    # Generar gráfico simple para Telegram
+    fig, ax = plt.subplots(); ax.plot(df.tail(20)'].values); plt['close'].values); plt.savefig("/tmp.savefig("/tmp/in.png/in.png"); plt.close"); plt()
+    telegram.close()
+    telegram_enviar__enviar_imagenimagen("/tmp/in.png", msg)
 
-def paper_revisar_sl_tp(df):
-    global PAPER_BALANCE, PAPER_WIN, PAPER_LOSS, PAPER_TRADES_TOTALES, TRADE_HISTORY
-    if not PAPER_ACTIVE_TRADES: return
-    c, h, l = df['close'].iloc[-1], df['high'].iloc[-1], df['low'].iloc[-1]
-    ema, atr = df['ema20'].iloc[-1], df['atr'].iloc[-1]
-    h_prev, l_prev = df['high'].iloc[-2], df['low'].iloc[-2]
+def("/tmp/in.png", msg paper_re)
+
+def paper_revisarvisar_sl_sl_tp_tp(df(df):
+    global):
+    global PAPER_BALANCE, PAPER_BALANCE, PAPER PAPER_WIN_WIN, PAP, PAPER_LOSS,ER_LOSS, PAPER PAPER_TRADES_T_TRADES_TOTALESOTALES, TRADE_H, TRADE_HISTORYISTORY
+    if not
+    if not PAPER_ACTIVE_TR PAPER_ACTIVE_TRADESADES: return: return
+    c,
+    c, h, h, l = l = df[' df['close'].ilocclose'].iloc[-1[-1], df['high], df['high'].iloc[-'].iloc[-1],1], df['low']. df['low'].ilociloc[-1]
+    ema[-1]
+    ema, atr = df[', atr = df['ema20'].iloc[-1], df['atrema20'].iloc[-1], df['atr'].iloc[-1]
+    h_prev'].iloc[-1]
+    h_prev, l, l_prev_prev = df = df['high'].iloc[-['high'].iloc[-2],2], df[' df['low'].low'].iloc[-2iloc[-2]
+]
     
-    cerrar_ids = []
-    for tid, t in PAPER_ACTIVE_TRADES.items():
-        # TP1 (50%)
-        if not t['tp1_ejecutado'] and t['tp1']:
-            if (t['decision']=="Buy" and h>=t['tp1']) or (t['decision']=="Sell" and l<=t['tp1']):
-                ganancia = abs(t['tp1'] - t['entrada']) * (t['size_btc'] * PCT_TP1)
-                t['pnl_parcial'] += ganancia
-                PAPER_BALANCE += ganancia
-                t['tp1_ejecutado'] = True
-                t['sl_actual'] = t['entrada']
-                print(f"🎯 TP1 alcanzado en trade #{tid}")
-                telegram_mensaje(f"🎯 TP1 #{tid} hit. SL a Breakeven.")
+    cerrar_ids    
+    cerrar_ids = = []
+    for []
+    for tid, tid, t in t in PAPER_ACT PAPER_ACTIVE_TRADES.itemsIVE_TRADES.items():
+        #():
+        # TP1 (50 TP1 (50%)
+       %)
+        if not t['tp1 if not t['tp1_ejecut_ejecutado']ado'] and t['tp and t['tp1']:
+            if (1']:
+            if (t['decision']=="Buy" and h>=t['t['decision']=="Buy" and h>=t['tp1']) or (t['decision']=="Selltp1']) or (t['decision']=="Sell" and l<=t['tp1']):
+                gan" and l<=t['tp1']):
+                ganancia = abs(t['tpancia = abs(t['tp1'] - t1'] - t['ent['entrada']) * (rada']) * (t['t['size_btc'] *size_btc'] * PCT_ PCT_TP1)
+                t['pnlTP1)
+                t['pnl_parcial']_parcial'] += gan += ganancia
+                PAPER_Bancia
+                PAPER_BALANCE += gananciaALANCE += ganancia
+                t['tp
+                t['tp1_ejecutado1_ejecutado'] ='] = True
+                t True
+                t['sl['sl_actual'] =_actual'] = t[' t['entrada']
+               entrada']
+                print(f"🎯 TP print(f"🎯 TP1 alcan1 alcanzado en tradezado en trade #{tid #{tid}")
+                telegram_m}")
+                telegram_mensajeensaje(f"🎯 TP1 #{tid(f"🎯 TP1 #{tid} hit} hit. SL a Bre. SL a Breakevenakeven.")
         
+        #.")
+ TP2 (30%)
+               
         # TP2 (30%)
-        if t['tp1_ejecutado'] and not t['tp2_ejecutado'] and t['tp2']:
-            if (t['decision']=="Buy" and h>=t['tp2']) or (t['decision']=="Sell" and l<=t['tp2']):
-                ganancia = abs(t['tp2'] - t['entrada']) * (t['size_btc'] * PCT_TP2)
-                t['pnl_parcial'] += ganancia
-                PAPER_BALANCE += ganancia
-                t['tp2_ejecutado'] = True
-                print(f"🎯 TP2 alcanzado en trade #{tid}")
-                telegram_mensaje(f"🎯 TP2 #{tid} hit.")
+        if t['tp1_ejec if t['tp1_ejecutado'] andutado'] and not t not t['tp2_e['tp2_ejecutadojecutado'] and t['tp2'] and t['tp2']']:
+            if (t:
+            if (t['decision['decision']=="Buy"']=="Buy" and h>=t['tp2']) and h>=t['tp2']) or (t[' or (t['decision']=="Sell"decision']=="Sell" and l and l<=t<=t['tp2']['tp):
+                gan2']):
+                gananciaancia = abs(t[' = abs(t['tp2'] -tp2'] - t['entrada']) * (t['size_btc'] * PCT_TP2)
+                t['pn t['entrada']) * (t['size_btc'] * PCT_TP2)
+                t['pnl_parciall_parcial'] += ganancia
+                PAPER_B'] += ganancia
+                PAPERALANCE +=_BALANCE += ganancia
+                t[' ganancia
+                t['tp2tp2_ejecutado']_ejecutado'] = True
+                print(f"🎯 TP = True
+                print(f"🎯 TP2 alcan2 alcanzado en trade #{tidzado en trade #{tid}")
+               }")
+                telegram_m telegram_mensajeensaje(f"🎯 TP2(f"🎯 TP2 #{tid} hit #{tid} hit.")
+
+        # Trailing / SL.")
 
         # Trailing / SL
+        cerrar, motivo =
         cerrar, motivo = False, ""
-        if t['tp1_ejecutado']:
-            if t['decision']=="Buy":
-                t['sl_actual'] = max(t['sl_actual'], ema-(atr*0.2) if t['trailing_logic']=="EMA20" else l_prev)
-                if l <= t['sl_actual']: cerrar, motivo = True, "Trailing"
+        if t False, ""
+        if t['tp1_ejecutado']['tp1_ejecutado']:
+            if:
+            if t[' t['decision']=="Buy":
+               decision']=="Buy":
+                t['sl_actual'] t['sl_actual'] = max(t['sl_actual'], ema = max(t['sl_actual'], ema-(at-(atr*0.r*0.2) if t['tra2) if t['trailing_logic']=="iling_logic']=="EMA20EMA20" else l_" else l_prevprev)
+                if l <= t[')
+                if l <= t['sl_actual']sl_actual']: cerrar,: cerr motivo = True, "Traar, motivo = True, "Trailing"
             else:
-                t['sl_actual'] = min(t['sl_actual'], ema+(atr*0.2) if t['trailing_logic']=="EMA20" else h_prev)
-                if h >= t['sl_actual']: cerrar, motivo = True, "Trailing"
+               iling"
+            else:
+                t['sl_actual'] t['sl_actual'] = min(t['sl_ = min(t['sl_actual'], ema+(atactual'], ema+(atr*0.2)r*0.2) if t['trailing_logic if t['trailing_logic']=="EMA20" else']=="EMA20" else h_prev h_prev)
+                if)
+                if h >= t[' h >= t['sl_actual']: cerrsl_actual']: cerrar, motivo = True,ar, motivo = True, "Tra "Trailing"
+        elseiling"
         else:
-            if (t['decision']=="Buy" and l <= t['sl_inicial']) or (t['decision']=="Sell" and h >= t['sl_inicial']):
+            if (:
+            if (t['decision']=="Buyt['decision']=="Buy" and l <= t['" andsl_in l <= t['sl_inicial']) or (t['icial']) or (t['decision']=="Sdecision']=="Sell"ell" and h >= t['sl and h >= t['sl_inicial']_inicial']):
+                cerrar, motivo = True, "Stop):
                 cerrar, motivo = True, "Stop Loss"
 
         if cerrar:
-            pct = 0.20 if t['tp2_ejecutado'] else (0.50 if t['tp1_ejecutado'] else 1.0)
-            pnl_f = (t['sl_actual']-t['entrada'])*t['size_btc']*pct if t['decision']=="Buy" else (t['entrada']-t['sl_actual'])*t['size_btc']*pct
-            pnl_t = t['pnl_parcial'] + pnl_f
-            PAPER_BALANCE += pnl_f
-            PAPER_TRADES_TOTALES += 1
-            if pnl_t > 0: PAPER_WIN += 1
-            else: PAPER_LOSS += 1
-            TRADE_HISTORY.append({"pnl": pnl_t, "resultado_win": pnl_t > 0, "decision": t['decision'], "razon": t['razon']})
-            cerrar_ids.append(tid)
-            print(f"📤 CERRADO #{tid} ({motivo}) | PnL: {pnl_t:.2f} USDT | Balance: {PAPER_BALANCE:.2f}")
-            telegram_mensaje(f"📤 CERRADO #{tid} ({motivo}). PnL: {pnl_t:.2f} USDT")
-            reporte_estado()
+            Loss"
 
-    for tid in cerrar_ids: del PAPER_ACTIVE_TRADES[tid]
-    if len(TRADE_HISTORY) > 0 and len(TRADE_HISTORY) % 10 == 0: aprender_de_trades()
+        if cerrar:
+            pct =  pct = 0.0.20 if t['tp220 if t['tp2_ejecutado']_ejecutado'] else (0.50 if t[' else (0.50 if t['tp1tp1_ej_ejecutado'] else 1.ecutado'] else 1.0)
+            pnl_f0)
+            pnl_f = ( = (t['sl_t['sl_actual']actual']-t['ent-t['entrada']rada'])*t['size_bt)*t['size_btc']*pc']*pct ifct if t[' t['decision']=="Buy" else (t['entrada']decision']=="Buy" else (t['entrada']-t['sl_actual-t['sl_actual'])*'])*t['size_btct['size_btc']*pct']*pct
+           
+            pnl_t = pnl_t = t['pnl_par t['pnl_parcial']cial'] + pnl_f + pnl_f
+            PAPER_BAL
+            PAPER_BALANCE +=ANCE += pnl_f
+            PAPER_TRADES pnl_f
+            PAPER_TRADES_TOTALES +=_TOTALES += 1
+            if pnl_t 1
+            if pnl_t >  > 0: PAPER_WIN += 0: PAPER_WIN += 11
+            else
+            else: PAPER_L: PAPER_LOSS +=OSS += 1
+            
+            1
+            
+            # --- # --- CORRECCIÓN: Convertir a tipos serializ CORRECCIÓN: Convertir a tipos serializables antes de guardar en historial ---
+            trade_record = convertirables antes de guardar en historial ---
+            trade_record = convertir_serializable({
+                "pnl_serializable({
+                "pnl": p": pnl_t,
+               nl_t,
+                "result "resultado_win":ado_win": pnl pnl_t > 0,
+               _t > 0,
+                "decision "decision": t": t['decision'],
+               ['decision'],
+                "razon": "razon": t['razon']
+            t['razon']
+            })
+            TRADE })
+            TRADE_HIST_HISTORY.append(tradeORY.append(trade_record_record)
+            
+            cerrar_ids.append)
+            
+            cerrar_ids.append(tid(tid)
+           )
+            print(f"📤 CERRADO #{tid} ({motivo}) | print(f"📤 CERRADO #{tid} ({motivo}) | PnL: {pnl_t:.2f} USDT | Balance PnL: {pnl_t:.2f} USDT | Balance: {PAPER_B: {PAPER_BALANCE:.2f}")
+            telegramALANCE:.2f}")
+            telegram_mens_mensaje(faje(f""📤 CERRADO📤 CERRADO #{tid} ({ #{tidmotivo} ({motivo}). P}). PnLnL: {pnl: {_t:.2fpnl_t:.2f} USDT")
+            report} USDT")
+            reporte_estadoe_estado()
 
-# =================== AUTOAPRENDIZAJE Y LOOP ===================
+   ()
+
+    for tid in cerr for tid in cerrar_idsar_ids: del: del PAPER PAPER_ACTIVE_TRADES_ACTIVE_TRADES[tid[tid]
+   ]
+    if len(TR if len(TRADE_HADE_HISTORYISTORY) >) > 0 and len 0 and len(TR(TRADE_HADE_HISTORY) %ISTORY) % 10 10 == 0 == 0: aprender_de: aprender_de_trades()
+
+#_trades()
+
+# =================== AUTOAPRENDIZ =================== AUTOAPRENDIZAJE Y LOAJE Y LOOP ===================
+defOP = aprender_de==================
 def aprender_de_trades():
-    global REGLAS_APRENDIDAS, ULTIMO_APRENDIZAJE, ULTIMO_PROFIT_FACTOR
-    ult = TRADE_HISTORY[-10:]
-    gan = sum(t['pnl'] for t in ult if t['pnl']>0)
-    per = abs(sum(t['pnl'] for t in ult if t['pnl']<0))
-    ULTIMO_PROFIT_FACTOR = gan/per if per>0 else 1.0
-    prompt = f"Analiza estos 10 trades y dame una lección corta: {json.dumps(ult)}"
+   _trades():
+    global REGLAS_APR global REGLAS_APRENDIDAS, ULTENDIDAS, ULTIMO_APRENDIZIMO_APRENDIZAJE, ULTIMOAJE, ULTIMO_PROF_PROFIT_FACTORIT_FACTOR
     try:
-        resp = client.chat.completions.create(model=MODELO_VISION, messages=[{"role":"user","content":prompt}])
-        REGLAS_APRENDIDAS = resp.choices[0].message.content
-        print(f"🧠 APRENDIZAJE: {REGLAS_APRENDIDAS}")
-        telegram_mensaje(f"🧠 APRENDIZAJE: {REGLAS_APRENDIDAS}")
-        ULTIMO_APRENDIZAJE = PAPER_TRADES_TOTALES
+        ult
+    try:
+        ult = TR = TRADE_HISTORYADE_HISTORY[-10[-10:]
+       :]
+        gan = gan = sum(t sum(t['pnl']['pn for t in ult if tl'] for t in ult if t['pnl']['pnl']>0)
+        per = abs(sum(t['>0)
+        per = abs(sum(t['pnlpnl'] for t in ult if t[''] for t in ult if t['pnlpnl']']<0))
+        ULTIMO<0))
+        ULTIMO_PROFIT_FACTOR_PROFIT_FACTOR = gan/per if per> = gan/per if per>0 else 10 else 1.0.0
+        
+        # --- CORREC
+        
+        # --- CORRECCIÓN: Convertir laCIÓN: Convertir la lista a tipos serializables lista a tipos serial antes de json.dizables antes de json.dumps ---
+        ult_umps ---
+        ult_serializableserializable = convertir_serial = convertir_serializable(ult)
+        prompt = fizable(ult)
+        prompt = f"Analiza estos"Analiza estos 10 trades y dame 10 trades y dame una lección corta: una lección corta: {json.dumps {json.dumps(ult(ult_serial_serializable)}izable)}"
+        
+        resp"
+        
+        resp = client = client.chat.chat.completions.create(model=MODEL.completions.create(model=MODELO_VO_VISION,ISION, messages=[{"role":"user messages=[{"role":"user","content":prom","content":prompt}pt}])
+       ])
+        REGLAS_APRENDIDAS = resp REGLAS_APRENDIDAS = resp.choices.choices[0[0].message].message.content
+        print.content
+        print(f"(f"🧠 APREND🧠 APRENDIZAIZAJE: {REJE: {REGLAS_APGLAS_APRENDRENDIDASIDAS}")
+       }")
+        telegram_m telegram_mensaje(f"ensaje(f"🧠🧠 APRENDIZA APRENDIZAJE:JE: {REGLAS {REGLAS_AP_APRENDIDASRENDIDAS}")
+       }")
+        ULTIMO_ ULTIMO_APRAPRENDIZENDIZAJEAJE = PAP = PAPER_TRADESER_TRADES_TOTAL_TOTALES
+        guardES
         guardar_memoria()
+    except Exception as ear_memoria()
     except Exception as e:
-        print(f"❌ Error en aprendizaje: {e}")
+       :
+        print(f"❌ Error en aprendizaje print(f"❌ Error (no afecta al en aprendizaje trading): {e} (no afecta al trading): {")
 
-def risk_management_check():
-    global PAPER_DAILY_START_BALANCE, PAPER_STOPPED_TODAY, PAPER_CURRENT_DAY
-    hoy = datetime.now(timezone.utc).date()
-    if PAPER_CURRENT_DAY != hoy:
-        PAPER_CURRENT_DAY, PAPER_DAILY_START_BALANCE, PAPER_STOPPED_TODAY = hoy, PAPER_BALANCE, False
-        print(f"📅 Nuevo día: {hoy}. Balance inicial: {PAPER_DAILY_START_BALANCE:.2f}")
-    if (PAPER_BALANCE - PAPER_DAILY_START_BALANCE) / PAPER_DAILY_START_BALANCE <= -MAX_DAILY_DRAWDOWN_PCT:
-        PAPER_STOPPED_TODAY = True
-        print(f"🚨 Drawdown diario superado ({MAX_DAILY_DRAWDOWN_PCT*100}%). Bot detenido hasta mañana.")
+def risk_management_checke}")
+
+def risk_():
+    global PAPER_management_check():
+    global PAPDAILYER_DAILY_START_BAL_STARTANCE,_BALANCE, PAPER PAPER_STOP_STOPPEDPED_TOD_TODAY, PAPERAY, PAPER_CURRENT_CURRENT_DAY
+    hoy =_DAY
+    hoy = datetime.now(timezone datetime.now(timezone.ut.utc).date()
+    ifc).date()
+    if PAPER_CURRENT_DAY PAPER_CURRENT_DAY != hoy != hoy:
+        PAPER:
+        PAPER_CURRENT_CURRENT_DAY_DAY, PAP, PAPER_DAILYER_DAILY_START_START_BALANCE,_BALANCE, PAPER PAPER_STOPPED_TODAY =_STOPPED_TODAY = hoy, PAPER_BALANCE, hoy, PAPER_BALANCE, False
+        print(f" False
+        print📅 Nuevo día:(f"📅 Nuevo {hoy}. Balance inicial día: {hoy}. Balance inicial: {: {PAPPAPER_ER_DAILYDAILY_START_BALANCE:.2f}")
+   _START_BALANCE:.2f}")
+    if ( if (PAPER_BPAPER_BALANCEALANCE - PAPER_ - PAPER_DAILYDAILY_START_START_BAL_BALANCE) / PAPER_DAILYANCE) / PAPER_DAILY_START_START_BAL_BALANCE <= -MAX_DAILY_DANCE <= -MAX_DAILY_DRAWDRAWDOWN_POWN_PCTCT:
+        PAPER_ST:
+        PAPER_STOPPED_TOPPED_TODAY = TrueODAY = True
+       
+        print(f" print(f"🚨 Draw🚨 Drawdown didown diario superado ({MAX_DAILYario superado ({MAX_DAILY_DRA_DRAWDOWNWDOWN_PCT_PCT*100}%).*100}%). Bot det Bot detenido hasta maenido hasta mañana.")
+    returnñana not PAPER_STOPP.")
     return not PAPER_STOPPED_TODAY
 
 def run_bot():
     cargar_memoria()
-    print("🤖 BOT V99.43 INICIADO - Modo LOGS DETALLADOS")
+    print("🤖 BOT V99.43 INICIADO - Modo LOGS DETALLADOS + FIX JSON")
     telegram_mensaje("🤖 Bot V99.43 Online - Estructural Visual")
     ultima_vela = None
     iteracion = 0
     while True:
         try:
             iteracion += 1
-            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"\n🔄 [{now_str}] Ciclo #{iteracion} - Iniciando...")
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%MED_TODAY
+
+def run_bot():
+    cargar_memoria()
+    print("🤖 BOT V99.43 INICIADO - Modo LOGS DETALLADOS + FIX JSON")
+    telegram_mensaje("🤖 Bot V99.43 Online - Estructural Visual")
+    ultima_vela = None
+    iteracion = 0
+    while True:
+        try:
+            iteracion += 1
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S:%S")
+            print(f")
+            print(f"\n🔄 [{now_str}] Ciclo #{iteracion} - In"\n🔄 [{now_str}] Ciclo #{iteracion} - Iniciandoiciando...")
+            
+            # Obtener datos
+            df_raw = obtener_velas()
+            if df_raw.empty...")
             
             # Obtener datos
             df_raw = obtener_velas()
             if df_raw.empty:
-                print("⚠️ No se pudieron obtener velas. Reintentando...")
-                time.sleep(SLEEP_SECONDS)
-                continue
-            df = calcular_indicadores(df_raw)
+               :
+                print("⚠️ print("⚠️ No se No se pudieron obtener velas. Reintentando... pudieron obtener velas. Reintentando...")
+                time.sleep(SLEEP")
+                time.sleep(S_SECONDS)
+                continueLEEP_SECONDS)
+               
+            df continue
+            df = calcular = calcular_indicadores(df_indicadores(df_raw_raw)
+            if)
             if df.empty:
-                print("⚠️ DataFrame vacío tras indicadores. Reintentando...")
-                time.sleep(SLEEP_SECONDS)
+                df.empty:
+                print(" print("⚠️ DataFrame vac⚠️ DataFrame vacío tras indicadoresío tras indicadores. Re. Reintentintentando...")
+               ando...")
+                time.sleep time.sleep(SLEEP_SEC(SLEEP_SECONDSONDS)
                 continue
             
-            precio_actual = df['close'].iloc[-1]
-            print(f"📊 Precio actual: {precio_actual:.2f} | Trades activos: {len(PAPER_ACTIVE_TRADES)}/{MAX_CONCURRENT_TRADES} | Balance: {PAPER_BALANCE:.2f}")
+            precio_actual = df[')
+                continue
             
-            # Verificar nueva vela
-            vela_c = df.index[-2]
-            if ultima_vela is None:
-                ultima_vela = vela_c
-                print(f"🕯️ Vela base establecida: {vela_c}")
+            precio_actual = df['close'].close'].iloc[-1]
+           iloc[-1]
+            print(f print(f""📊 Pre📊 Precio actual: {precio_actual:.2f}cio actual: {precio_actual:.2f} | T | Trades activos:rades activos: {len(PAP {lenER_ACTIVE(PAPER_ACTIVE_TRADES)}/{MAX_CONCURRENT_TR_TRADES)}/{MAX_CONCURRENT_TRADES} | Balance:ADES} | Balance: {P {PAPERAPER_BALANCE:.2f_BALANCE:.2f}")
+            
+            # Verificar nueva v}")
+            
+            # Verificar nueva velaela
+            v
+            vela_c = dfela_c.index[-2]
+            if = df.index[-2]
+            if ultima ultima_vela is None_vela is:
+                ult None:
+                ultima_ima_vela = vvela = vela_cela_c
+                print(f"🕯
+                print(f️ Vela"🕯️ Vela base base establecida: {vela_c}")
             
             # Condiciones para nuevo análisis
-            if len(PAPER_ACTIVE_TRADES) < MAX_CONCURRENT_TRADES and ultima_vela != vela_c:
-                print(f"🕯️ Nueva vela detectada: {vela_c} (anterior: {ultima_vela})")
-                print("🔍 Ejecutando análisis de mercado...")
-                sop, res, slo, inter, t, m = detectar_zonas_mercado(df)
-                desc, atr = generar_descripcion_nison(df)
-                print("🧠 Enviando gráfico a IA para decisión...")
-                img = generar_grafico_para_vision(df, sop, res, slo, inter, df['close'].iloc[-1])
-                dec, raz, sl, tp1, tp2, log = analizar_con_qwen(desc, atr, REGLAS_APRENDIDAS, img)
-                print(f"🤖 Decisión IA: {dec} | Razón: {raz[:60]}...")
+            establecida: {vela_c}")
+            
+            # Condiciones para nuevo análisis
+            if len if len(PAPER_(PAPER_ACTIVE_TRADACTIVE_TRADES)ES) < MAX_CONCURRENT_TRADES < MAX_CONCURRENT_TRADES and ultima_ and ultima_velavela != vela_c != vela_c:
+                print(f":
+                print(f"🕯️ Nueva🕯 vela️ Nueva vela detectada detectada: {vela: {vela_c}_c} (anterior: {ultima_ (anterior: {ultima_velavela})")
+                print("🔍 Ej})")
+                print("🔍 Ejecutecutando análisis de mercado...ando análisis de mercado...")
+                sop")
+                sop, res, res, sl, slo, inter,o, inter, t, m = detectar_zon t, m = detectar_zonas_mercado(dfas_mercado(df)
+                desc, at)
+                desc, atr =r = generar_descripcion generar_descripcion_nison_nison(df)
+                print("🧠 En(df)
+                print("🧠 Enviandoviando gráfico a IA para decis gráfico a IA para decisión...")
+                img =ión...")
+                generar_grafico_para img = generar_grafico_vision(df,_para_vision(df, sop, res, sop, res, slo slo, inter, df['close']., inter, df['close'].iloc[-iloc[-1])
+                dec1, raz, sl, tp1,])
+                dec, raz, sl, tp1, tp2, log tp2, log = analizar_con = analizar_con_qwen_qwen(desc(desc, atr, REGLAS_APREND, atr, REGLAS_APRENDIDASIDAS, img, img)
+               )
+                print(f print(f"🤖 Decisión IA: {"🤖 Decisión IA: {dec} | Razón:dec} | Razón: {raz {raz[:60]}...[:60]}...")
                 
-                if dec in ["Buy","Sell"]:
-                    print(f"✅ IA sugiere operación {dec}. Verificando risk management...")
+                if")
+                
+                if dec in dec in ["Buy","S ["Buy","Sell"]:
+                   ell"]:
+                    print(f"✅ IA sugiere print(f"✅ IA sugiere operación {dec}. Verificando operación {dec}. Verificando risk management risk management...")
+                    if...")
                     if risk_management_check():
-                        print(f"🚀 Abriendo posición {dec}...")
-                        paper_abrir_posicion(dec, df['close'].iloc[-1], atr, raz, sl, tp1, tp2, log, df, sop, res, slo, inter)
+                        risk_management_check():
+                        print(f" print(f"🚀 Abriendo🚀 Ab posición {dec}riendo posición {dec}...")
+                        paper_ab...")
+                        paperrir_posicion(dec,_abrir_posicion(dec, df[' df['close'].ilocclose'].iloc[-1],[-1], at atr, raz, sl,r, raz, sl, tp1, tp tp1, tp2,2, log, df, log, df, sop, sop, res, res, slo, inter)
+                    slo, inter)
                     else:
-                        print("⛔ Risk management bloqueó la operación (drawdown diario alcanzado).")
+                        print(" else:
+                        print("⛔ Risk management⛔ Risk management bloqueó la operación (drawdown bloqueó la operación ( diario alcanzado).drawdown diario alcanzado).")
+                else")
                 else:
-                    print(f"⏸️ IA decidió HOLD. Motivo: {raz[:100] if raz else 'No especificado'}")
-                ultima_vela = vela_c
-            elif ultima_vela == vela_c:
-                print("⏳ Misma vela, no se repite análisis. Esperando nueva vela...")
+                    print(f":
+                    print(f"⏸️ IA decid⏸️ IA decidió HOLD. Motivoió HOLD. Motivo: {: {raz[:100] if raz else 'raz[:100] if raz else 'No especificado'}")
+               No especificado'}")
+                ultima_vela = ultima_vela = vela_c
+            elif vela_c
+            elif ultima_vela == ultima_vela == vela vela_c:
+                print_c:
+                print("⏳ Misma vela("⏳ Misma vela, no se repite análisis, no se repite análisis. Esperando nueva. Esperando nueva vela vela...")
             else:
-                print(f"⏸️ Máximo de trades concurrentes alcanzado ({len(PAPER_ACTIVE_TRADES)}/{MAX_CONCURRENT_TRADES}). No se analiza nueva entrada.")
+               ...")
+            else:
+                print(f"⏸️ Má print(f"⏸️ Máximo deximo de trades concurrent trades concurrentes alcanzado ({len(PAPes alcanzado ({len(PAPER_ACTIVEER_ACTIVE_TRAD_TRADES)}/{MAX_CONCURRENT_TRADES}). NoES)}/{MAX_CONCURRENT_TRADES}). No se anal se analiza nueva entradaiza nueva entrada.")
             
-            # Revisar SL/TP de trades activos
-            if PAPER_ACTIVE_TRADES:
-                print("🔎 Revisando condiciones de SL/TP en trades activos...")
+           .")
+            
+            # Revisar SL/TP de # Revisar SL/TP de trades activ trades activosos
+            if
+            if PAPER_ACT PAPER_ACTIVE_TRIVE_TRADES:
+               ADES:
+                print("🔎 Revisando condiciones de SL/TP print("🔎 Revisando condiciones de SL/TP en trades activos... en trades activos")
                 paper_revisar_sl_tp(df)
-            else:
-                print("💤 Sin trades activos en este momento.")
+           ... else:
+                print")
+                paper_revisar_sl_tp(df)
+            else("💤 Sin:
+                print("💤 Sin trades activ trades activos enos en este momento este momento.")
             
-            # Mostrar resumen cada 10 ciclos o si hay cambios significativos
+            # Mostrar.")
+            
+            # Mostrar resumen cada 10 cic resumen cada 10 cicloslos
+            if iteracion % 10
             if iteracion % 10 == 0:
-                winrate = (PAPER_WIN / PAPER_TRADES_TOTALES * 100) if PAPER_TRADES_TOTALES > 0 else 0
-                print(f"📈 RESUMEN [{now_str}]: Balance={PAPER_BALANCE:.2f} | Trades={PAPER_TRADES_TOTALES} | Winrate={winrate:.1f}% | PF={ULTIMO_PROFIT_FACTOR:.2f}")
+                winrate = ( == 0:
+                winrate = (PAPER_WIN /PAPER_WIN / PAPER_TRADES_TOTALES PAPER_TRADES_TOTALES *  * 100) if PAP100) if PAPER_TRER_TRADESADES_TOTALES > 0_TOTALES > 0 else  else 00
+                print
+                print(f"📈(f"📈 RESUMEN RESUMEN [{now_str} [{now_str}]: Balance={PAPER_BALANCE:.2f} | Trades={PAPER_TRADES_TOTALES]: Balance={PAPER_BALANCE:.2f} | Trades={PAPER_TRADES_TOTALES} | Winrate} |={winrate:. Winrate={winrate:.1f}% | PF1f}% | PF={ULTIMO_PRO={ULTIMO_PROFITFIT_FACTOR:._FACTOR:.2f}")
             
-            time.sleep(SLEEP_SECONDS)
-        except Exception as e:
-            print(f"❌ ERROR CRÍTICO: {e}")
+            time.sleep(SLEEP2f}")
+            
+            time.sleep(SLEEP_SECONDS_SECONDS)
+        except Exception)
+        except Exception as e as e:
+            print(f:
+            print(f"❌ ERROR"❌ ERROR CRÍ CRÍTICO: {TICO: {ee}")
+            import traceback}")
             import traceback
+            traceback.print_exc
             traceback.print_exc()
             time.sleep(30)
 
-if __name__ == '__main__':
+if __()
+            time.sleep(name__30)
+
+if __ == '__name__ == '__main__':
+    run_bot()
+main__':
     run_bot()
