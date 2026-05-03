@@ -98,6 +98,20 @@ def get_free_margin():
         print(f"❌ Error obteniendo margen libre: {e}")
     return 0.0
 
+def get_real_position_size():
+    """Devuelve el tamaño absoluto actual de la posición BTCUSDT (0.0 si no hay)."""
+    try:
+        params = {"category": "linear", "symbol": "BTCUSDT"}
+        result = bybit_request("/v5/position/list", method="GET", params=params)
+        if result.get('retCode') == 0:
+            for pos in result['result']['list']:
+                if pos['symbol'] == "BTCUSDT":
+                    return abs(float(pos['size']))
+        return 0.0
+    except Exception as e:
+        print(f"❌ Error get_real_position_size: {e}")
+        return 0.0
+
 def place_market_order(side, qty):
     """Coloca orden market real."""
     try:
@@ -120,15 +134,27 @@ def place_market_order(side, qty):
         return None
 
 def close_position_qty(qty, side_to_close):
-    """Cierra una cantidad de posición (reduce only)."""
+    """Cierra una cantidad de posición (reduce only). Verifica que la posición exista."""
     try:
+        # Obtener tamaño real actual
+        real_size = get_real_position_size()
+        if real_size <= 0.0:
+            print("⚠️ No hay posición real en Bybit. Se omite cierre.")
+            return "already_closed"  # Retorna un indicador de éxito simulado
+
+        # Ajustar cantidad a cerrar al tamaño real para no exceder
+        qty_to_close = min(qty, real_size)
+        if qty_to_close <= 0.0 or qty_to_close < 0.001:
+            print(f"⚠️ Cantidad a cerrar ({qty_to_close}) es menor al mínimo (0.001 BTC). Se omite.")
+            return "already_closed"
+
         close_side = "Sell" if side_to_close == "Buy" else "Buy"
         body = {
             "category": "linear",
             "symbol": "BTCUSDT",
             "side": close_side,
             "orderType": "Market",
-            "qty": str(abs(qty)),
+            "qty": str(round(qty_to_close, 3)),
             "timeInForce": "GTC",
             "reduceOnly": True
         }
@@ -146,29 +172,26 @@ def sync_positions_with_bybit():
     """Elimina trades en memoria que no existen realmente en Bybit (trades fantasma)."""
     global REAL_ACTIVE_TRADES
     try:
-        params = {"category": "linear", "symbol": "BTCUSDT"}
-        result = bybit_request("/v5/position/list", method="GET", params=params)
-        if result.get('retCode') != 0:
-            print("⚠️ No se pudo obtener posiciones reales para sincronizar")
-            return
-
-        real_positions = result['result']['list']
-        size_bybit = 0.0
-        for pos in real_positions:
-            if pos['symbol'] == "BTCUSDT":
-                size_bybit = abs(float(pos['size']))
-                break
-
-        if size_bybit == 0.0 and REAL_ACTIVE_TRADES:
+        real_size = get_real_position_size()
+        if real_size == 0.0 and REAL_ACTIVE_TRADES:
             print("🧹 Sincronización: No hay posiciones reales en Bybit. Limpiando trades fantasmas.")
             REAL_ACTIVE_TRADES.clear()
             guardar_memoria()
-        elif size_bybit > 0.0 and not REAL_ACTIVE_TRADES:
+        elif real_size > 0.0 and not REAL_ACTIVE_TRADES:
             print("⚠️ Hay posición real en Bybit pero el bot no la registra. Se recomienda cerrarla manualmente o reiniciar el bot.")
         else:
             print("✅ Sincronización de posiciones: OK")
     except Exception as e:
         print(f"❌ Error en sync_positions_with_bybit: {e}")
+
+def force_sync_active_trades():
+    """Elimina trades de memoria que no tengan posición real (antes de revisar cierres)."""
+    global REAL_ACTIVE_TRADES
+    real_size = get_real_position_size()
+    if real_size == 0.0 and REAL_ACTIVE_TRADES:
+        print("🧹 Sincronización forzada: limpiando trades fantasma.")
+        REAL_ACTIVE_TRADES.clear()
+        guardar_memoria()
 
 # ====== MEMORIA PERSISTENTE ======
 MEMORY_FILE = "memoria_bot_real.json"
@@ -523,6 +546,11 @@ def real_revisar_sl_tp(df):
     if not REAL_ACTIVE_TRADES:
         return
 
+    # Sincronización forzada antes de revisar (evita errores 110017)
+    force_sync_active_trades()
+    if not REAL_ACTIVE_TRADES:
+        return
+
     c = df['close'].iloc[-1]
     h = df['high'].iloc[-1]
     l = df['low'].iloc[-1]
@@ -538,9 +566,17 @@ def real_revisar_sl_tp(df):
             if (t['decision']=="Buy" and h >= t['tp1']) or (t['decision']=="Sell" and l <= t['tp1']):
                 qty_cerrar = t['qty_original'] * PCT_TP1
                 qty_cerrar = round(qty_cerrar, 3)
+                if qty_cerrar < 0.001:
+                    qty_cerrar = 0.001
                 if qty_cerrar > 0 and qty_cerrar <= t['qty_restante']:
                     order_id = close_position_qty(qty_cerrar, t['decision'])
-                    if order_id:
+                    if order_id == "already_closed":
+                        # La posición ya no existe, marcamos todo como cerrado
+                        t['qty_restante'] = 0
+                        t['tp1_ejecutado'] = True
+                        cerrar_ids.append(tid)
+                        continue
+                    elif order_id:
                         ganancia = abs(t['tp1'] - t['entrada']) * qty_cerrar
                         t['pnl_parcial'] += ganancia
                         REAL_BALANCE = get_real_balance()
@@ -557,9 +593,16 @@ def real_revisar_sl_tp(df):
             if (t['decision']=="Buy" and h >= t['tp2']) or (t['decision']=="Sell" and l <= t['tp2']):
                 qty_cerrar = t['qty_original'] * PCT_TP2
                 qty_cerrar = round(qty_cerrar, 3)
+                if qty_cerrar < 0.001:
+                    qty_cerrar = 0.001
                 if qty_cerrar > 0 and qty_cerrar <= t['qty_restante']:
                     order_id = close_position_qty(qty_cerrar, t['decision'])
-                    if order_id:
+                    if order_id == "already_closed":
+                        t['qty_restante'] = 0
+                        t['tp2_ejecutado'] = True
+                        cerrar_ids.append(tid)
+                        continue
+                    elif order_id:
                         ganancia = abs(t['tp2'] - t['entrada']) * qty_cerrar
                         t['pnl_parcial'] += ganancia
                         REAL_BALANCE = get_real_balance()
@@ -595,9 +638,20 @@ def real_revisar_sl_tp(df):
                 cerrar, motivo = True, "Stop Loss"
 
         if cerrar and t['qty_restante'] > 0:
-            order_id = close_position_qty(t['qty_restante'], t['decision'])
-            if order_id:
-                pnl_resto = (t['sl_actual'] - t['entrada']) * t['qty_restante'] if t['decision']=="Buy" else (t['entrada'] - t['sl_actual']) * t['qty_restante']
+            real_size = get_real_position_size()
+            if real_size <= 0.0:
+                # Ya no hay posición
+                cerrar_ids.append(tid)
+                continue
+            qty_to_close = min(t['qty_restante'], real_size)
+            if qty_to_close < 0.001:
+                cerrar_ids.append(tid)
+                continue
+            order_id = close_position_qty(qty_to_close, t['decision'])
+            if order_id == "already_closed" or order_id:
+                # Usar precio actual de cierre para estimar PnL
+                close_price = df['close'].iloc[-1]
+                pnl_resto = (close_price - t['entrada']) * qty_to_close if t['decision']=="Buy" else (t['entrada'] - close_price) * qty_to_close
                 pnl_total = t['pnl_parcial'] + pnl_resto
                 REAL_BALANCE = get_real_balance()
                 TOTAL_TRADES += 1
