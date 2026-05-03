@@ -83,6 +83,21 @@ def get_real_balance():
         print(f"❌ Error obteniendo saldo: {e}")
         return None
 
+def get_free_margin():
+    """Obtiene margen libre disponible en USDT (saldo - margen usado)."""
+    try:
+        params = {"accountType": "UNIFIED"}
+        result = bybit_request("/v5/account/wallet-balance", method="GET", params=params)
+        if result.get('retCode') == 0:
+            for coin in result['result']['list'][0]['coin']:
+                if coin['coin'] == 'USDT':
+                    wallet = float(coin['walletBalance'])
+                    used = float(coin.get('usedMargin', 0))
+                    return wallet - used
+    except Exception as e:
+        print(f"❌ Error obteniendo margen libre: {e}")
+    return 0.0
+
 def place_market_order(side, qty):
     """Coloca orden market real."""
     try:
@@ -126,6 +141,34 @@ def close_position_qty(qty, side_to_close):
     except Exception as e:
         print(f"❌ Excepción close_position_qty: {e}")
         return None
+
+def sync_positions_with_bybit():
+    """Elimina trades en memoria que no existen realmente en Bybit (trades fantasma)."""
+    global REAL_ACTIVE_TRADES
+    try:
+        params = {"category": "linear", "symbol": "BTCUSDT"}
+        result = bybit_request("/v5/position/list", method="GET", params=params)
+        if result.get('retCode') != 0:
+            print("⚠️ No se pudo obtener posiciones reales para sincronizar")
+            return
+
+        real_positions = result['result']['list']
+        size_bybit = 0.0
+        for pos in real_positions:
+            if pos['symbol'] == "BTCUSDT":
+                size_bybit = abs(float(pos['size']))
+                break
+
+        if size_bybit == 0.0 and REAL_ACTIVE_TRADES:
+            print("🧹 Sincronización: No hay posiciones reales en Bybit. Limpiando trades fantasmas.")
+            REAL_ACTIVE_TRADES.clear()
+            guardar_memoria()
+        elif size_bybit > 0.0 and not REAL_ACTIVE_TRADES:
+            print("⚠️ Hay posición real en Bybit pero el bot no la registra. Se recomienda cerrarla manualmente o reiniciar el bot.")
+        else:
+            print("✅ Sincronización de posiciones: OK")
+    except Exception as e:
+        print(f"❌ Error en sync_positions_with_bybit: {e}")
 
 # ====== MEMORIA PERSISTENTE ======
 MEMORY_FILE = "memoria_bot_real.json"
@@ -204,7 +247,8 @@ RISK_PER_TRADE = 0.02
 LEVERAGE = 10
 SLEEP_SECONDS = 60
 GRAFICO_VELAS_LIMIT = 120
-MAX_CONCURRENT_TRADES = 1
+MAX_CONCURRENT_TRADES = 3               # Máximo 3 operaciones simultáneas
+MIN_MARGEN_POR_TRADE = 10.0            # Mínimo 10 USDT de margen por trade (balance real con x10)
 PCT_TP1, PCT_TP2 = 0.50, 0.30
 
 # Estado real
@@ -253,7 +297,7 @@ def reporte_estado():
         f"💰 Balance: {REAL_BALANCE:.2f} USDT\n"
         f"📈 PnL día: {pnl_global:+.2f} USDT\n"
         f"🎯 Winrate: {winrate:.1f}%\n"
-        f"⚡ Activos: {len(REAL_ACTIVE_TRADES)}\n"
+        f"⚡ Activos: {len(REAL_ACTIVE_TRADES)}/{MAX_CONCURRENT_TRADES}\n"
         f"📐 PF (10t): {ULTIMO_PROFIT_FACTOR:.2f}"
     )
     telegram_mensaje(mensaje)
@@ -391,7 +435,7 @@ MEMORIA: {reglas}
 def real_abrir_posicion(decision, precio, atr, razon, sl_ia, tp1_ia, tp2_ia, logic_ia, df, sop, res, slo, inter):
     global REAL_BALANCE, TRADE_COUNTER, REAL_ACTIVE_TRADES, TOTAL_TRADES
     if len(REAL_ACTIVE_TRADES) >= MAX_CONCURRENT_TRADES:
-        print("⚠️ Máximo de trades concurrentes alcanzado. No se abre nueva posición.")
+        print(f"⚠️ Máximo de trades concurrentes ({MAX_CONCURRENT_TRADES}) alcanzado. No se abre nueva posición.")
         return
 
     if REAL_BALANCE is None:
@@ -416,9 +460,26 @@ def real_abrir_posicion(decision, precio, atr, razon, sl_ia, tp1_ia, tp2_ia, log
         print("⚠️ Cantidad a operar demasiado pequeña. Abortando.")
         return
 
+    # Redondear y verificar mínimo de exchange (0.001 BTC y valor nocional 100 USDT)
     qty_btc = round(qty_btc, 3)
-    if qty_btc < 0.001:
-        print("⚠️ Cantidad mínima no alcanzada (0.001 BTC). Abortando.")
+    min_qty_exchange = 0.001
+    # Ajustar si el valor nocional es menor a 100 USDT
+    if qty_btc * precio < 100.0:
+        qty_btc = round(100.0 / precio, 3)
+        print(f"⚠️ Ajustando cantidad para cumplir nocional mínimo: {qty_btc} BTC")
+    if qty_btc < min_qty_exchange:
+        print(f"⚠️ Cantidad mínima no alcanzada (mínimo {min_qty_exchange} BTC). Abortando.")
+        return
+
+    # Verificación de margen disponible
+    margen_necesario = (qty_btc * precio) / LEVERAGE
+    if margen_necesario < MIN_MARGEN_POR_TRADE:
+        print(f"⚠️ El margen necesario ({margen_necesario:.2f} USDT) es inferior al mínimo por trade ({MIN_MARGEN_POR_TRADE} USDT). Abortando.")
+        return
+
+    free_margin = get_free_margin()
+    if free_margin < margen_necesario:
+        print(f"⚠️ Margen insuficiente. Necesario: {margen_necesario:.2f} USDT, Libre: {free_margin:.2f} USDT. No se abre trade.")
         return
 
     # Colocar orden market
@@ -601,13 +662,14 @@ def risk_management_check():
 def run_bot():
     global REAL_BALANCE, ULTIMO_APRENDIZAJE, TOKENS_ACUMULADOS, ULTIMO_PROFIT_FACTOR, TRADE_HISTORY, REAL_ACTIVE_TRADES
     cargar_memoria()
+    sync_positions_with_bybit()   # Elimina trades fantasmas al inicio
     set_leverage()
     REAL_BALANCE = get_real_balance()
     if REAL_BALANCE is None:
         print("❌ No se pudo obtener el saldo real. Abortando.")
         return
-    print(f"🤖 BOT REAL V99.43 INICIADO - Balance: {REAL_BALANCE:.2f} USDT - Apalancamiento {LEVERAGE}x")
-    telegram_mensaje(f"🤖 Bot Real Online - Balance: {REAL_BALANCE:.2f} USDT - Apalancamiento {LEVERAGE}x")
+    print(f"🤖 BOT REAL V99.43 INICIADO - Balance: {REAL_BALANCE:.2f} USDT - Apalancamiento {LEVERAGE}x - Max trades: {MAX_CONCURRENT_TRADES}")
+    telegram_mensaje(f"🤖 Bot Real Online - Balance: {REAL_BALANCE:.2f} USDT - Apalancamiento {LEVERAGE}x - Max trades: {MAX_CONCURRENT_TRADES}")
 
     ultima_vela = None
     iteracion = 0
