@@ -1,4 +1,4 @@
-# BOT TRADING REAL – Bybit + Qwen3-VL-32B-Instruct (Basado en deepsel buenisimo)
+# BOT TRADING REAL – Bybit + Qwen3-VL-32B-Instruct (CORREGIDO: TP1 parcial + trailing + aprendizaje)
 # ==============================================================================
 import os, time, requests, json, numpy as np, pandas as pd
 from scipy.stats import linregress
@@ -32,7 +32,7 @@ BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
 if not BYBIT_API_KEY or not BYBIT_API_SECRET:
     raise ValueError("Faltan BYBIT_API_KEY o BYBIT_API_SECRET")
 
-# =================== FUNCIONES BYBIT (REALES) ===================
+# =================== FUNCIONES BYBIT ===================
 def bybit_request(endpoint, method="GET", params=None, body=None):
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
@@ -128,14 +128,16 @@ def place_market_order(side, qty):
         return None
 
 def close_position_qty(qty, side_to_close):
+    """Cierra una cantidad específica (reduceOnly). Retorna orderId o 'already_closed'."""
     try:
         real_size = get_real_position_size()
         if real_size <= 0.0:
             print("⚠️ No hay posición real. Se omite cierre.")
             return "already_closed"
         qty_to_close = min(qty, real_size)
+        # Mínimo 0.001 BTC para BTCUSDT
         if qty_to_close <= 0.0 or qty_to_close < 0.001:
-            print(f"⚠️ Cantidad a cerrar ({qty_to_close}) menor al mínimo (0.001 BTC).")
+            print(f"⚠️ Cantidad a cerrar ({qty_to_close}) menor al mínimo (0.001 BTC). Se omite.")
             return "already_closed"
         close_side = "Sell" if side_to_close == "Buy" else "Buy"
         body = {
@@ -149,6 +151,7 @@ def close_position_qty(qty, side_to_close):
         }
         result = bybit_request("/v5/order/create", method="POST", body=body)
         if result.get('retCode') == 0:
+            print(f"✅ Cierre parcial de {qty_to_close} BTC ejecutado.")
             return result['result']['orderId']
         else:
             print(f"❌ Error close_position_qty: {result}")
@@ -158,27 +161,20 @@ def close_position_qty(qty, side_to_close):
         return None
 
 def sync_positions_with_bybit():
+    """Sincronización al inicio del bot. Elimina trades fantasmas si no hay posición real."""
     global REAL_ACTIVE_TRADES
     try:
         real_size = get_real_position_size()
         if real_size == 0.0 and REAL_ACTIVE_TRADES:
-            print("🧹 Sincronización: limpiando trades fantasmas.")
+            print("🧹 Sincronización inicial: limpiando trades fantasmas.")
             REAL_ACTIVE_TRADES.clear()
             guardar_memoria()
         elif real_size > 0.0 and not REAL_ACTIVE_TRADES:
-            print("⚠️ Hay posición real pero el bot no la registra.")
+            print("⚠️ Hay posición real pero el bot no la registra. Se recomienda cerrarla manualmente.")
         else:
-            print("✅ Sincronización OK")
+            print("✅ Sincronización inicial OK.")
     except Exception as e:
         print(f"❌ Error sync: {e}")
-
-def force_sync_active_trades():
-    global REAL_ACTIVE_TRADES
-    real_size = get_real_position_size()
-    if real_size == 0.0 and REAL_ACTIVE_TRADES:
-        print("🧹 Sync forzada: limpiando fantasmas.")
-        REAL_ACTIVE_TRADES.clear()
-        guardar_memoria()
 
 # ====== MEMORIA PERSISTENTE ======
 MEMORY_FILE = "memoria_bot_real.json"
@@ -258,8 +254,7 @@ LEVERAGE = 10
 SLEEP_SECONDS = 60
 GRAFICO_VELAS_LIMIT = 120
 MAX_CONCURRENT_TRADES = 3
-
-PCT_TP1, PCT_TP2 = 0.50, 0.30   # 50% TP1, 30% TP2, 20% restante a trailing
+PCT_TP1, PCT_TP2 = 0.50, 0.30
 
 REAL_BALANCE = None
 REAL_ACTIVE_TRADES = {}
@@ -279,7 +274,7 @@ ULTIMO_PROFIT_FACTOR = 1.0
 REGLAS_APRENDIDAS = "Aún no hay lecciones. Busca confluencia."
 TOKENS_ACUMULADOS = 0
 
-# =================== COMUNICACIÓN TELEGRAM ===================
+# =================== TELEGRAM ===================
 def telegram_mensaje(texto):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
@@ -436,7 +431,7 @@ MEMORIA: {reglas}
         print(f"❌ Error en IA: {e}")
         return "Hold", "Error API", 0, 0, 0, "EMA20"
 
-# =================== GESTIÓN REAL (APERTURA Y CIERRE) ===================
+# =================== GESTIÓN REAL CORREGIDA ===================
 def real_abrir_posicion(decision, precio, atr, razon, sl_ia, tp1_ia, tp2_ia, logic_ia, df, sop, res, slo, inter):
     global REAL_BALANCE, TRADE_COUNTER, REAL_ACTIVE_TRADES, TOTAL_TRADES
     if len(REAL_ACTIVE_TRADES) >= MAX_CONCURRENT_TRADES:
@@ -514,11 +509,7 @@ def real_revisar_sl_tp(df):
     if not REAL_ACTIVE_TRADES:
         return
 
-    force_sync_active_trades()  # Limpia fantasmas antes de revisar
-    if not REAL_ACTIVE_TRADES:
-        return
-
-    c = df['close'].iloc[-1]
+    # Obtenemos datos de la vela actual
     h = df['high'].iloc[-1]
     l = df['low'].iloc[-1]
     ema = df['ema20'].iloc[-1]
@@ -528,38 +519,43 @@ def real_revisar_sl_tp(df):
 
     cerrar_ids = []
     for tid, t in list(REAL_ACTIVE_TRADES.items()):
-        # TP1 (50%)
+        # --- TP1 (50% del original) ---
         if not t['tp1_ejecutado'] and t['tp1'] is not None and t['tp1'] > 0:
             if (t['decision']=="Buy" and h >= t['tp1']) or (t['decision']=="Sell" and l <= t['tp1']):
                 qty_cerrar = round(t['qty_original'] * PCT_TP1, 3)
                 if qty_cerrar < 0.001:
                     qty_cerrar = 0.001
                 if qty_cerrar > 0 and qty_cerrar <= t['qty_restante']:
+                    print(f"🔨 Ejecutando TP1 para #{tid} - Cantidad a cerrar: {qty_cerrar} BTC")
                     result = close_position_qty(qty_cerrar, t['decision'])
                     if result == "already_closed":
+                        # La posición ya no existe (caso borde)
                         t['qty_restante'] = 0
                         t['tp1_ejecutado'] = True
                         cerrar_ids.append(tid)
                         continue
                     elif result:
+                        # Esperar un momento para que el exchange actualice el tamaño
+                        time.sleep(0.5)
                         ganancia = abs(t['tp1'] - t['entrada']) * qty_cerrar
                         t['pnl_parcial'] += ganancia
                         REAL_BALANCE = get_real_balance()
                         t['qty_restante'] -= qty_cerrar
                         t['tp1_ejecutado'] = True
                         t['sl_actual'] = t['entrada']  # breakeven
-                        print(f"🎯 TP1 real #{tid} +{ganancia:.2f} USDT")
-                        telegram_mensaje(f"🎯 TP1 #{tid} hit. SL a breakeven.")
+                        print(f"🎯 TP1 real #{tid} +{ganancia:.2f} USDT. Restante: {t['qty_restante']} BTC")
+                        telegram_mensaje(f"🎯 TP1 #{tid} hit. SL a breakeven. Restante {t['qty_restante']:.3f} BTC")
                     else:
                         print(f"❌ Falló cierre TP1 #{tid}")
 
-        # TP2 (30%)
+        # --- TP2 (30% del original, solo si ya se ejecutó TP1) ---
         if t['tp1_ejecutado'] and not t['tp2_ejecutado'] and t['tp2'] is not None and t['tp2'] > 0:
             if (t['decision']=="Buy" and h >= t['tp2']) or (t['decision']=="Sell" and l <= t['tp2']):
                 qty_cerrar = round(t['qty_original'] * PCT_TP2, 3)
                 if qty_cerrar < 0.001:
                     qty_cerrar = 0.001
                 if qty_cerrar > 0 and qty_cerrar <= t['qty_restante']:
+                    print(f"🔨 Ejecutando TP2 para #{tid} - Cantidad a cerrar: {qty_cerrar} BTC")
                     result = close_position_qty(qty_cerrar, t['decision'])
                     if result == "already_closed":
                         t['qty_restante'] = 0
@@ -567,21 +563,22 @@ def real_revisar_sl_tp(df):
                         cerrar_ids.append(tid)
                         continue
                     elif result:
+                        time.sleep(0.5)
                         ganancia = abs(t['tp2'] - t['entrada']) * qty_cerrar
                         t['pnl_parcial'] += ganancia
                         REAL_BALANCE = get_real_balance()
                         t['qty_restante'] -= qty_cerrar
                         t['tp2_ejecutado'] = True
-                        print(f"🎯 TP2 real #{tid} +{ganancia:.2f} USDT")
-                        telegram_mensaje(f"🎯 TP2 #{tid} hit.")
+                        print(f"🎯 TP2 real #{tid} +{ganancia:.2f} USDT. Restante: {t['qty_restante']} BTC")
+                        telegram_mensaje(f"🎯 TP2 #{tid} hit. Restante {t['qty_restante']:.3f} BTC")
                     else:
                         print(f"❌ Falló cierre TP2 #{tid}")
 
-        # Trailing / SL
+        # --- Trailing stop (solo después de TP1) y Stop Loss inicial ---
         cerrar = False
         motivo = ""
         if t['tp1_ejecutado']:
-            # Actualizar trailing
+            # Actualizar trailing según la lógica elegida por la IA
             if t['trailing_logic'] == "EMA20":
                 nuevo_sl = ema - (atr * 0.2) if t['decision'] == "Buy" else ema + (atr * 0.2)
             else:  # LOW_CANDLE
@@ -589,28 +586,39 @@ def real_revisar_sl_tp(df):
             if t['decision'] == "Buy":
                 if nuevo_sl > t['sl_actual']:
                     t['sl_actual'] = nuevo_sl
+                    print(f"📈 Trailing #{tid} -> SL actualizado a {t['sl_actual']:.2f}")
                 if l <= t['sl_actual']:
                     cerrar, motivo = True, "Trailing"
             else:
                 if nuevo_sl < t['sl_actual']:
                     t['sl_actual'] = nuevo_sl
+                    print(f"📉 Trailing #{tid} -> SL actualizado a {t['sl_actual']:.2f}")
                 if h >= t['sl_actual']:
                     cerrar, motivo = True, "Trailing"
         else:
+            # Stop loss inicial
             if (t['decision'] == "Buy" and l <= t['sl_inicial']) or (t['decision'] == "Sell" and h >= t['sl_inicial']):
                 cerrar, motivo = True, "Stop Loss"
 
+        # Si hay que cerrar el resto de la posición
         if cerrar and t['qty_restante'] > 0:
+            # Obtener tamaño real actual (para evitar errores 110017)
             real_size = get_real_position_size()
             if real_size <= 0.0:
+                print(f"⚠️ No hay posición real para #{tid}, se marca como cerrado.")
                 cerrar_ids.append(tid)
                 continue
+
             qty_to_close = min(t['qty_restante'], real_size)
             if qty_to_close < 0.001:
+                print(f"⚠️ Cantidad restante muy pequeña ({qty_to_close}), se cierra el trade.")
                 cerrar_ids.append(tid)
                 continue
+
+            print(f"🔨 Cerrando resto de #{tid} - {qty_to_close} BTC por {motivo}")
             result = close_position_qty(qty_to_close, t['decision'])
             if result == "already_closed" or result:
+                # Usar precio actual de cierre para estimar PnL
                 close_price = df['close'].iloc[-1]
                 pnl_resto = (close_price - t['entrada']) * qty_to_close if t['decision'] == "Buy" else (t['entrada'] - close_price) * qty_to_close
                 pnl_total = t['pnl_parcial'] + pnl_resto
@@ -624,19 +632,21 @@ def real_revisar_sl_tp(df):
                     "pnl": pnl_total, "resultado_win": pnl_total > 0, "decision": t['decision'], "razon": t['razon']
                 }))
                 cerrar_ids.append(tid)
-                print(f"📤 CERRADO #{tid} ({motivo}) | PnL: {pnl_total:.2f} USDT")
+                print(f"📤 CERRADO #{tid} ({motivo}) | PnL: {pnl_total:.2f} USDT | Balance: {REAL_BALANCE:.2f}")
                 telegram_mensaje(f"📤 CERRADO #{tid} ({motivo}). PnL: {pnl_total:.2f} USDT")
                 reporte_estado()
             else:
                 print(f"❌ Falló cierre final #{tid}")
 
+    # Eliminar los trades cerrados de la memoria
     for tid in cerrar_ids:
         del REAL_ACTIVE_TRADES[tid]
 
-    if len(TRADE_HISTORY) > 0 and len(TRADE_HISTORY) % 10 == 0:
+    # Aprendizaje cada 10 trades (solo si hay suficientes)
+    if TOTAL_TRADES > 0 and TOTAL_TRADES % 10 == 0 and TOTAL_TRADES != ULTIMO_APRENDIZAJE:
         aprender_de_trades()
 
-# =================== AUTOAPRENDIZAJE (IDÉNTICO AL PAPER) ===================
+# =================== AUTOAPRENDIZAJE MEJORADO ===================
 def aprender_de_trades():
     global REGLAS_APRENDIDAS, ULTIMO_APRENDIZAJE, ULTIMO_PROFIT_FACTOR
     try:
@@ -645,15 +655,21 @@ def aprender_de_trades():
         per = abs(sum(t['pnl'] for t in ult if t['pnl']<0))
         ULTIMO_PROFIT_FACTOR = gan/per if per>0 else 1.0
         ult_serial = convertir_serializable(ult)
-        prompt = f"Analiza estos 10 trades reales y dame una lección corta: {json.dumps(ult_serial)}"
+        prompt = f"Analiza estos 10 trades reales y dame una lección corta (máximo 3 líneas): {json.dumps(ult_serial)}"
         resp = client.chat.completions.create(model=MODELO_VISION, messages=[{"role":"user","content":prompt}])
         REGLAS_APRENDIDAS = resp.choices[0].message.content
         print(f"🧠 APRENDIZAJE: {REGLAS_APRENDIDAS}")
-        telegram_mensaje(f"🧠 APRENDIZAJE: {REGLAS_APRENDIDAS}")
+        telegram_mensaje(f"🧠 APRENDIZAJE (últimos 10 trades): {REGLAS_APRENDIDAS}")
         ULTIMO_APRENDIZAJE = TOTAL_TRADES
         guardar_memoria()
     except Exception as e:
-        print(f"❌ Error en aprendizaje: {e}")
+        print(f"❌ Error en aprendizaje (falló IA): {e}")
+        # Aún así enviamos un resumen manual
+        winrate = (WIN_COUNT / TOTAL_TRADES * 100) if TOTAL_TRADES > 0 else 0
+        mensaje_manual = f"📚 Lección automática: {TOTAL_TRADES} trades, winrate {winrate:.1f}%, PF {ULTIMO_PROFIT_FACTOR:.2f}. Revisa tus configuraciones."
+        telegram_mensaje(mensaje_manual)
+        ULTIMO_APRENDIZAJE = TOTAL_TRADES
+        guardar_memoria()
 
 # =================== RISK MANAGEMENT DIARIO ===================
 def risk_management_check():
@@ -677,14 +693,14 @@ def risk_management_check():
 def run_bot():
     global REAL_BALANCE, ULTIMO_APRENDIZAJE, TOKENS_ACUMULADOS, ULTIMO_PROFIT_FACTOR, TRADE_HISTORY, REAL_ACTIVE_TRADES
     cargar_memoria()
-    sync_positions_with_bybit()   # Limpia fantasmas al inicio
+    sync_positions_with_bybit()   # Limpieza inicial
     set_leverage()
     REAL_BALANCE = get_real_balance()
     if REAL_BALANCE is None:
         print("❌ No se pudo obtener saldo real. Abortando.")
         return
-    print(f"🤖 BOT REAL V99.43 INICIADO - Balance: {REAL_BALANCE:.2f} USDT - Max trades: {MAX_CONCURRENT_TRADES}")
-    telegram_mensaje(f"🤖 Bot Real Online - Balance: {REAL_BALANCE:.2f} USDT")
+    print(f"🤖 BOT REAL CORREGIDO INICIADO - Balance: {REAL_BALANCE:.2f} USDT - Max trades: {MAX_CONCURRENT_TRADES}")
+    telegram_mensaje(f"🤖 Bot Real Online (corregido) - Balance: {REAL_BALANCE:.2f} USDT")
 
     ultima_vela = None
     iteracion = 0
