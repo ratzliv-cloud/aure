@@ -62,11 +62,12 @@ def bybit_request(endpoint, method="GET", params=None, body=None):
 
 def set_leverage():
     try:
-        body = {"category": "linear", "symbol": "BTCUSDT", "buyLeverage": "10", "sellLeverage": "10"}
+        # Apalancamiento 34x para que con 3 USDT de margen se alcance el nocional mínimo de 100 USDT
+        body = {"category": "linear", "symbol": "BTCUSDT", "buyLeverage": "34", "sellLeverage": "34"}
         result = bybit_request("/v5/position/set-leverage", method="POST", body=body)
         ret_code = result.get('retCode')
         if ret_code == 0 or ret_code == 110043:
-            print("✅ Apalancamiento 10x configurado")
+            print("✅ Apalancamiento 34x configurado")
         else:
             print(f"⚠️ Error configurando apalancamiento: {result}")
     except Exception as e:
@@ -234,12 +235,12 @@ def parse_json_seguro(raw):
 # =================== CONFIGURACIÓN DEL BOT ===================
 SYMBOL = "BTCUSDT"
 INTERVAL = "5"
-RISK_PER_TRADE = 0.02
-LEVERAGE = 10
+RISK_PER_TRADE = 3.0               # Riesgo fijo en USDT por trade
+LEVERAGE = 34                       # Apalancamiento para alcanzar nocional mínimo de 100 USDT
 SLEEP_SECONDS = 60
 GRAFICO_VELAS_LIMIT = 120
-MAX_CONCURRENT_TRADES = 3           # Máximo teórico, pero se limitará dinámicamente por saldo
-PCT_TP1, PCT_TP2 = 0.50, 0.30
+MAX_CONCURRENT_TRADES = 3           # Máximo de trades simultáneos
+MIN_MARGIN_PER_TRADE = 3.0          # Margen requerido por trade (3 USDT)
 
 REAL_BALANCE = None
 REAL_ACTIVE_TRADES = {}
@@ -263,6 +264,9 @@ TOKENS_ACUMULADOS = 0
 def telegram_mensaje(texto):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
+        # Evitar mensajes demasiado largos
+        if len(texto) > 4000:
+            texto = texto[:4000]
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
                       data={"chat_id": TELEGRAM_CHAT_ID, "text": texto}, timeout=10)
     except Exception as e: print(f"Error Telegram: {e}")
@@ -276,19 +280,22 @@ def telegram_enviar_imagen(ruta_imagen, caption=""):
     except Exception as e: print(f"Error imagen Telegram: {e}")
 
 def reporte_estado():
+    if REAL_BALANCE is None:
+        return
     pnl_global = REAL_BALANCE - (DAILY_START_BALANCE or REAL_BALANCE)
     winrate = (WIN_COUNT / TOTAL_TRADES * 100) if TOTAL_TRADES > 0 else 0
+    max_din = get_dynamic_max_trades()
     mensaje = (
         f"📊 **ESTADO REAL BTC**\n"
         f"💰 Balance: {REAL_BALANCE:.2f} USDT\n"
         f"📈 PnL día: {pnl_global:+.2f} USDT\n"
         f"🎯 Winrate: {winrate:.1f}%\n"
-        f"⚡ Activos: {len(REAL_ACTIVE_TRADES)}/{MAX_CONCURRENT_TRADES_DINAMICO}\n"
+        f"⚡ Activos: {len(REAL_ACTIVE_TRADES)}/{max_din}\n"
         f"📐 PF (10t): {ULTIMO_PROFIT_FACTOR:.2f}"
     )
     telegram_mensaje(mensaje)
 
-# =================== INDICADORES Y ZONAS (IDÉNTICO AL PAPER) ===================
+# =================== INDICADORES Y ZONAS ===================
 def obtener_velas(limit=150):
     try:
         r = requests.get(f"{BASE_URL}/v5/market/kline", params={"category": "linear", "symbol": SYMBOL, "interval": INTERVAL, "limit": limit}, timeout=20)
@@ -429,8 +436,6 @@ def sync_active_trades_with_bybit():
     # Si hay posición real pero la memoria no la tiene, forzar cierre o registrar? (caso raro)
     elif real_size > 0.0 and not REAL_ACTIVE_TRADES:
         print("⚠️ Hay posición real pero el bot no la registra. Se recomienda cerrar manualmente.")
-        # Opcional: intentar cerrar la posición real para evitar inconsistencias
-        # close_position_qty(real_size, "Buy" if ... pero no sabemos dirección. Mejor solo avisar.
     else:
         # Verificar que la suma de qty_restante coincida aproximadamente con real_size
         mem_size = sum(t['qty_restante'] for t in REAL_ACTIVE_TRADES.values())
@@ -446,12 +451,10 @@ def sync_active_trades_with_bybit():
                 guardar_memoria()
 
 def get_dynamic_max_trades():
-    """Calcula el número máximo de trades simultáneos según el saldo real (cada trade requiere ~10 USDT de margen)."""
+    """Calcula el número máximo de trades simultáneos según el saldo real (mínimo 3 USDT por trade)."""
     if REAL_BALANCE is None:
         return 1
-    # Con apalancamiento 10x, para abrir una posición necesitas al menos 10 USDT de margen (por el nocional mínimo de 100 USDT)
-    # Por seguridad, cada trade requiere 10 USDT de margen disponible
-    max_by_balance = int(REAL_BALANCE // 10)
+    max_by_balance = int(REAL_BALANCE // MIN_MARGIN_PER_TRADE)
     if max_by_balance < 1:
         max_by_balance = 1
     return min(MAX_CONCURRENT_TRADES, max_by_balance)
@@ -477,8 +480,10 @@ def real_abrir_posicion(decision, precio, atr, razon, sl_ia, tp1_ia, tp2_ia, log
         sl_final = precio + atr
 
     distancia = abs(precio - sl_final)
-    risk_amount = REAL_BALANCE * RISK_PER_TRADE
+    risk_amount = RISK_PER_TRADE   # Fijo: 3 USDT
     qty_btc = risk_amount / distancia
+
+    # Ajustar por apalancamiento y margen disponible
     max_qty = (REAL_BALANCE * LEVERAGE) / precio
     qty_btc = min(qty_btc, max_qty)
 
@@ -486,17 +491,20 @@ def real_abrir_posicion(decision, precio, atr, razon, sl_ia, tp1_ia, tp2_ia, log
         print("⚠️ Cantidad a operar demasiado pequeña.")
         return
 
-    qty_btc = round(qty_btc, 3)
-
-    # Verificar mínimos de exchange
-    if qty_btc * precio < 100.0:
+    # Verificar nocional mínimo (100 USDT)
+    nominal = qty_btc * precio
+    if nominal < 100.0:
         qty_btc = round(100.0 / precio, 3)
-        print(f"⚠️ Ajustando a nocional mínimo: {qty_btc} BTC")
+        print(f"⚠️ Ajustando a nocional mínimo: {qty_btc} BTC (nominal ~{qty_btc*precio:.2f} USDT)")
+
+    # Verificar mínimo de cantidad (0.001 BTC)
     if qty_btc < 0.001:
-        print("⚠️ Mínimo 0.001 BTC no alcanzado.")
+        print(f"⚠️ Mínimo 0.001 BTC no alcanzado (qty={qty_btc:.4f}). No se abre trade.")
         return
 
-    # Verificar margen disponible
+    qty_btc = round(qty_btc, 3)
+
+    # Verificar margen disponible (margen necesario = nominal / leverage)
     margen_necesario = (qty_btc * precio) / LEVERAGE
     free_margin = get_free_margin()
     if free_margin < margen_necesario:
@@ -519,7 +527,7 @@ def real_abrir_posicion(decision, precio, atr, razon, sl_ia, tp1_ia, tp2_ia, log
         "razon": razon, "order_id": order_id
     }
     REAL_ACTIVE_TRADES[TRADE_COUNTER] = t
-    msg = f"🚀 [#{TRADE_COUNTER}] {decision} REAL en {precio:.2f} | Qty {qty_btc} BTC\nRazon: {razon}"
+    msg = f"🚀 [#{TRADE_COUNTER}] {decision} REAL en {precio:.2f} | Qty {qty_btc} BTC (Margen: {margen_necesario:.2f} USDT)\nRazon: {razon}"
     print(msg)
     telegram_mensaje(msg)
 
@@ -546,52 +554,42 @@ def real_revisar_sl_tp(df):
 
     cerrar_ids = []
     for tid, t in list(REAL_ACTIVE_TRADES.items()):
-        # --- TP1 (50% del original) ---
+        # --- TP1 (cierra todo el remanente para evitar fracciones < 0.001) ---
         if not t['tp1_ejecutado'] and t['tp1'] is not None and t['tp1'] > 0:
             if (t['decision']=="Buy" and h >= t['tp1']) or (t['decision']=="Sell" and l <= t['tp1']):
-                qty_cerrar = round(t['qty_original'] * PCT_TP1, 3)
-                # Si la cantidad a cerrar es menor que el mínimo permitido (0.001), cierro todo el remanente
-                if qty_cerrar < 0.001:
-                    qty_cerrar = t['qty_restante']
-                    print(f"⚠️ TP1: cantidad {qty_cerrar} < 0.001, se cerrará todo el remanente.")
-                if qty_cerrar > 0 and qty_cerrar <= t['qty_restante']:
-                    print(f"🔨 Ejecutando TP1 para #{tid} - Cantidad a cerrar: {qty_cerrar} BTC")
+                qty_cerrar = t['qty_restante']   # Cerrar todo lo que queda
+                if qty_cerrar >= 0.001:
+                    print(f"🔨 Ejecutando TP1 (cierre total) para #{tid} - Cantidad: {qty_cerrar} BTC")
                     result = close_position_qty(qty_cerrar, t['decision'])
                     if result == "already_closed":
-                        # La posición ya no existe, marcamos todo como cerrado
                         t['qty_restante'] = 0
                         t['tp1_ejecutado'] = True
                         cerrar_ids.append(tid)
                         continue
                     elif result:
-                        # Esperar a que la posición se actualice (máximo 2 reintentos)
                         for _ in range(5):
                             time.sleep(0.3)
                             new_real_size = get_real_position_size()
                             if new_real_size < t['qty_restante'] - qty_cerrar + 0.0005:
                                 break
-                        # Calcular ganancia real usando el precio del TP1
                         ganancia = abs(t['tp1'] - t['entrada']) * qty_cerrar
                         t['pnl_parcial'] += ganancia
-                        # No sumamos a REAL_BALANCE aquí, porque el balance real ya se actualizó por el cierre
                         REAL_BALANCE = get_real_balance()
                         t['qty_restante'] -= qty_cerrar
                         t['tp1_ejecutado'] = True
-                        t['sl_actual'] = t['entrada']  # breakeven
                         print(f"🎯 TP1 real #{tid} +{ganancia:.2f} USDT. Restante: {t['qty_restante']:.3f} BTC")
-                        telegram_mensaje(f"🎯 TP1 #{tid} hit. SL a breakeven. Restante {t['qty_restante']:.3f} BTC")
+                        telegram_mensaje(f"🎯 TP1 #{tid} hit. Cerrado {qty_cerrar} BTC, ganancia +{ganancia:.2f} USDT")
+                        if t['qty_restante'] <= 0.0001:
+                            cerrar_ids.append(tid)
                     else:
                         print(f"❌ Falló cierre TP1 #{tid}")
 
-        # --- TP2 (30% del original) ---
-        if t['tp1_ejecutado'] and not t['tp2_ejecutado'] and t['tp2'] is not None and t['tp2'] > 0:
+        # --- TP2 (solo si TP1 ya se ejecutó y aún queda remanente; también cierra todo) ---
+        if t['tp1_ejecutado'] and not t['tp2_ejecutado'] and t['tp2'] is not None and t['tp2'] > 0 and t['qty_restante'] > 0.001:
             if (t['decision']=="Buy" and h >= t['tp2']) or (t['decision']=="Sell" and l <= t['tp2']):
-                qty_cerrar = round(t['qty_original'] * PCT_TP2, 3)
-                if qty_cerrar < 0.001:
-                    qty_cerrar = t['qty_restante']
-                    print(f"⚠️ TP2: cantidad {qty_cerrar} < 0.001, se cerrará todo el remanente.")
-                if qty_cerrar > 0 and qty_cerrar <= t['qty_restante']:
-                    print(f"🔨 Ejecutando TP2 para #{tid} - Cantidad a cerrar: {qty_cerrar} BTC")
+                qty_cerrar = t['qty_restante']
+                if qty_cerrar >= 0.001:
+                    print(f"🔨 Ejecutando TP2 (cierre total) para #{tid} - Cantidad: {qty_cerrar} BTC")
                     result = close_position_qty(qty_cerrar, t['decision'])
                     if result == "already_closed":
                         t['qty_restante'] = 0
@@ -610,7 +608,9 @@ def real_revisar_sl_tp(df):
                         t['qty_restante'] -= qty_cerrar
                         t['tp2_ejecutado'] = True
                         print(f"🎯 TP2 real #{tid} +{ganancia:.2f} USDT. Restante: {t['qty_restante']:.3f} BTC")
-                        telegram_mensaje(f"🎯 TP2 #{tid} hit. Restante {t['qty_restante']:.3f} BTC")
+                        telegram_mensaje(f"🎯 TP2 #{tid} hit. Cerrado {qty_cerrar} BTC, ganancia +{ganancia:.2f} USDT")
+                        if t['qty_restante'] <= 0.0001:
+                            cerrar_ids.append(tid)
                     else:
                         print(f"❌ Falló cierre TP2 #{tid}")
 
@@ -640,7 +640,6 @@ def real_revisar_sl_tp(df):
                 cerrar, motivo = True, "Stop Loss"
 
         if cerrar and t['qty_restante'] > 0:
-            # Obtener tamaño real actualizado
             real_size = get_real_position_size()
             if real_size <= 0.0:
                 print(f"⚠️ No hay posición real para #{tid}, se marca como cerrado.")
@@ -655,7 +654,6 @@ def real_revisar_sl_tp(df):
             print(f"🔨 Cerrando resto de #{tid} - {qty_to_close} BTC por {motivo}")
             result = close_position_qty(qty_to_close, t['decision'])
             if result == "already_closed" or result:
-                # Usar el precio de cierre de la vela actual para estimar PnL
                 close_price = df['close'].iloc[-1]
                 pnl_resto = (close_price - t['entrada']) * qty_to_close if t['decision'] == "Buy" else (t['entrada'] - close_price) * qty_to_close
                 pnl_total = t['pnl_parcial'] + pnl_resto
@@ -692,7 +690,7 @@ def aprender_de_trades():
         per = abs(sum(t['pnl'] for t in ult if t['pnl']<0))
         ULTIMO_PROFIT_FACTOR = gan/per if per>0 else 1.0
         ult_serial = convertir_serializable(ult)
-        prompt = f"Analiza estos 10 trades reales y dame una lección corta: {json.dumps(ult_serial)}"
+        prompt = f"Analiza estos 10 trades reales y dame una lección corta (máximo 200 caracteres): {json.dumps(ult_serial)}"
         resp = client.chat.completions.create(model=MODELO_VISION, messages=[{"role":"user","content":prompt}])
         REGLAS_APRENDIDAS = resp.choices[0].message.content
         print(f"🧠 APRENDIZAJE: {REGLAS_APRENDIDAS}")
@@ -784,7 +782,9 @@ def run_bot():
                 print("🔎 Revisando trades activos...")
                 real_revisar_sl_tp(df)
 
+            # Reporte de estado periódico cada 10 iteraciones (~10 minutos)
             if iteracion % 10 == 0:
+                reporte_estado()
                 winrate = (WIN_COUNT / TOTAL_TRADES * 100) if TOTAL_TRADES > 0 else 0
                 print(f"📈 RESUMEN: Balance={REAL_BALANCE:.2f} | Trades={TOTAL_TRADES} | Winrate={winrate:.1f}% | PF={ULTIMO_PROFIT_FACTOR:.2f}")
 
