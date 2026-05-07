@@ -26,7 +26,7 @@ MODELO_VISION = "Qwen/Qwen3-VL-32B-Instruct"
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-BASE_URL = "https://api-testnet.bybit.com"
+BASE_URL = "https://api.bybit.com"
 
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
