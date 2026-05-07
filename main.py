@@ -1,5 +1,5 @@
 # BOT TRADING REAL – Bybit + Qwen3-VL-32B-Instruct
-# Versión: IA solo con imagen (velas, sop/res, EMA20, tendencia). Sin ATR. Riesgo 3 USDT, apalancamiento 34x.
+# Versión: IA con imagen, riesgo 3 USDT, apalancamiento 34x, TP parcial + breakeven
 # ==============================================================================
 import os, time, requests, json, numpy as np, pandas as pd
 from scipy.stats import linregress
@@ -129,6 +129,7 @@ def place_market_order(side, qty):
         return None
 
 def close_position_qty(qty, side_to_close):
+    """Cierra una cantidad específica de la posición. Devuelve orderId o 'already_closed' si no hay posición."""
     try:
         real_size = get_real_position_size()
         if real_size <= 0.0:
@@ -180,7 +181,8 @@ def guardar_memoria():
             "razon": t.get("razon", ""), "tp1_ejecutado": t["tp1_ejecutado"],
             "tp2_ejecutado": t.get("tp2_ejecutado", False),
             "sl_actual": t.get("sl_actual"), "trailing_logic": t.get("trailing_logic", "EMA20"),
-            "qty_original": t.get("qty_original"), "qty_restante": t.get("qty_restante")
+            "qty_original": t.get("qty_original"), "qty_restante": t.get("qty_restante"),
+            "breakeven_activado": t.get("breakeven_activado", False)
         }
     data = {
         "TRADE_HISTORY": TRADE_HISTORY,
@@ -236,8 +238,9 @@ RISK_PER_TRADE = 3.0
 LEVERAGE = 34
 SLEEP_SECONDS = 60
 GRAFICO_VELAS_LIMIT = 120
-MAX_CONCURRENT_TRADES = 3
+MAX_CONCURRENT_TRADES = 1   # Por simplicidad, un solo trade a la vez mientras depuramos
 MIN_MARGIN_PER_TRADE = 3.0
+TP1_PERCENT = 0.5           # 50% de la posición se cierra en TP1, el resto queda con breakeven
 
 REAL_BALANCE = None
 REAL_ACTIVE_TRADES = {}
@@ -291,7 +294,7 @@ def reporte_estado():
     )
     telegram_mensaje(mensaje)
 
-# =================== INDICADORES Y ZONAS (sin ATR) ===================
+# =================== INDICADORES Y ZONAS ===================
 def obtener_velas(limit=150):
     try:
         r = requests.get(f"{BASE_URL}/v5/market/kline", params={"category": "linear", "symbol": SYMBOL, "interval": INTERVAL, "limit": limit}, timeout=20)
@@ -347,8 +350,6 @@ def analizar_patrones_conjuntos(df, idx):
     if not verde2 and verde3 and v3['close'] > v2['open']: patrones.append("ENVOLVENTE ALCISTA")
     if verde2 and not verde3 and v3['close'] < v2['open']: patrones.append("ENVOLVENTE BAJISTA")
     return " | ".join(patrones) if patrones else "Sin patrón claro"
-
-# Ya no se usa generar_descripcion_nison (eliminada)
 
 def generar_grafico_para_vision(df, soporte, resistencia, slope, intercept, precio):
     df_plot = df.tail(GRAFICO_VELAS_LIMIT).copy()
@@ -406,10 +407,10 @@ Define niveles concretos de salida basados en el gráfico:
 - sl_price: Precio donde la operación se invalida (justo debajo del soporte si es Buy, o encima de la resistencia si es Sell).
 - tp1_price: Primer objetivo (obstáculo cercano, un mínimo/máximo reciente o la EMA si actúa como resistencia/soporte).
 - tp2_price: Segundo objetivo (nivel de liquidez más lejano, siguiente soporte/resistencia visible).
-- trailing_logic: "EMA20" (seguir la EMA después de TP1) o "LOW_CANDLE" (seguir el mínimo/máximo de la vela anterior).
+- trailing_logic: Siempre será "BREAKEVEN" (después de TP1 el stop se mueve a entrada).
 
 Responde ÚNICAMENTE con un JSON en una línea, sin texto adicional, con esta estructura:
-{"decision":"Buy/Sell/Hold","razon":"texto muy corto","sl_price":0.0,"tp1_price":0.0,"tp2_price":0.0,"trailing_logic":"EMA20/LOW_CANDLE"}
+{"decision":"Buy/Sell/Hold","razon":"texto muy corto","sl_price":0.0,"tp1_price":0.0,"tp2_price":0.0,"trailing_logic":"BREAKEVEN"}
 """
         response = client.chat.completions.create(
             model=MODELO_VISION,
@@ -419,11 +420,11 @@ Responde ÚNICAMENTE con un JSON en una línea, sin texto adicional, con esta es
         TOKENS_ACUMULADOS += response.usage.total_tokens
         datos = parse_json_seguro(response.choices[0].message.content)
         if not datos:
-            return "Hold", "Error parsing", 0, 0, 0, "EMA20"
-        return datos.get("decision","Hold"), datos.get("razon",""), datos.get("sl_price"), datos.get("tp1_price"), datos.get("tp2_price"), datos.get("trailing_logic","EMA20")
+            return "Hold", "Error parsing", 0, 0, 0, "BREAKEVEN"
+        return datos.get("decision","Hold"), datos.get("razon",""), datos.get("sl_price"), datos.get("tp1_price"), datos.get("tp2_price"), "BREAKEVEN"
     except Exception as e:
         print(f"❌ Error en IA: {e}")
-        return "Hold", "Error API", 0, 0, 0, "EMA20"
+        return "Hold", "Error API", 0, 0, 0, "BREAKEVEN"
 
 # =================== FUNCIONES AUXILIARES ===================
 def sync_active_trades_with_bybit():
@@ -507,16 +508,19 @@ def real_abrir_posicion(decision, precio, razon, sl_ia, tp1_ia, tp2_ia, logic_ia
         return
 
     TRADE_COUNTER += 1
+    # Cantidad a cerrar en TP1 (la mitad)
+    qty_tp1 = round(qty_btc * TP1_PERCENT, 3)
+    qty_restante = round(qty_btc - qty_tp1, 3)
     t = {
         "id": TRADE_COUNTER, "decision": decision, "entrada": precio,
         "sl_inicial": sl_final, "sl_actual": sl_final,
-        "tp1": tp1_ia, "tp2": tp2_ia, "trailing_logic": logic_ia,
-        "qty_original": qty_btc, "qty_restante": qty_btc,
+        "tp1": tp1_ia, "tp2": tp2_ia, "trailing_logic": "BREAKEVEN",
+        "qty_original": qty_btc, "qty_restante": qty_restante,
         "tp1_ejecutado": False, "tp2_ejecutado": False, "pnl_parcial": 0.0,
-        "razon": razon, "order_id": order_id
+        "razon": razon, "order_id": order_id, "breakeven_activado": False
     }
     REAL_ACTIVE_TRADES[TRADE_COUNTER] = t
-    msg = f"🚀 [#{TRADE_COUNTER}] {decision} REAL en {precio:.2f} | Qty {qty_btc} BTC (Margen: {margen_necesario:.2f} USDT)\nRazon: {razon}"
+    msg = f"🚀 [#{TRADE_COUNTER}] {decision} REAL en {precio:.2f} | Qty total {qty_btc} BTC (TP1: {qty_tp1}, resto: {qty_restante})\nRazon: {razon}"
     print(msg)
     telegram_mensaje(msg)
 
@@ -532,133 +536,140 @@ def real_revisar_sl_tp(df):
 
     h = df['high'].iloc[-1]
     l = df['low'].iloc[-1]
-    ema = df['ema20'].iloc[-1]
-    h_prev = df['high'].iloc[-2]
-    l_prev = df['low'].iloc[-2]
+    ema = df['ema20'].iloc[-1]  # No usamos trailing, pero lo dejamos por si acaso
+    precio_cierre = df['close'].iloc[-1]
 
     cerrar_ids = []
     for tid, t in list(REAL_ACTIVE_TRADES.items()):
-        # TP1
+        # --- TP1: cerrar la porción específica y activar breakeven para el resto ---
         if not t['tp1_ejecutado'] and t['tp1'] is not None and t['tp1'] > 0:
             if (t['decision']=="Buy" and h >= t['tp1']) or (t['decision']=="Sell" and l <= t['tp1']):
-                qty_cerrar = t['qty_restante']
-                if qty_cerrar >= 0.001:
-                    print(f"🔨 Ejecutando TP1 (cierre total) para #{tid} - Cantidad: {qty_cerrar} BTC")
-                    result = close_position_qty(qty_cerrar, t['decision'])
-                    if result == "already_closed":
-                        t['qty_restante'] = 0
+                qty_tp1 = round(t['qty_original'] * TP1_PERCENT, 3)
+                if qty_tp1 >= 0.001 and t['qty_restante'] > 0:
+                    # Guardamos saldo antes del cierre
+                    balance_antes = get_real_balance()
+                    order_result = close_position_qty(qty_tp1, t['decision'])
+                    if order_result and order_result != "already_closed":
+                        time.sleep(1)
+                        balance_despues = get_real_balance()
+                        pnl_parcial_real = balance_despues - balance_antes
+                        t['pnl_parcial'] += pnl_parcial_real
+                        REAL_BALANCE = balance_despues
+                        t['qty_restante'] = round(t['qty_original'] - qty_tp1, 3)
                         t['tp1_ejecutado'] = True
-                        cerrar_ids.append(tid)
-                        continue
-                    elif result:
-                        for _ in range(5):
-                            time.sleep(0.3)
-                            new_real_size = get_real_position_size()
-                            if new_real_size < t['qty_restante'] - qty_cerrar + 0.0005:
-                                break
-                        ganancia = abs(t['tp1'] - t['entrada']) * qty_cerrar
-                        t['pnl_parcial'] += ganancia
-                        REAL_BALANCE = get_real_balance()
-                        t['qty_restante'] -= qty_cerrar
-                        t['tp1_ejecutado'] = True
-                        print(f"🎯 TP1 real #{tid} +{ganancia:.2f} USDT. Restante: {t['qty_restante']:.3f} BTC")
-                        telegram_mensaje(f"🎯 TP1 #{tid} hit. Cerrado {qty_cerrar} BTC, ganancia +{ganancia:.2f} USDT")
+                        # Activar breakeven para la parte restante: SL = entrada + pequeño offset
+                        offset = 2.0  # 2 dólares por encima/abajo para cubrir comisiones
+                        if t['decision'] == "Buy":
+                            nuevo_sl = t['entrada'] - offset
+                        else:
+                            nuevo_sl = t['entrada'] + offset
+                        t['sl_actual'] = nuevo_sl
+                        t['breakeven_activado'] = True
+                        print(f"🎯 TP1 alcanzado #{tid}. Cerrado {qty_tp1} BTC, PnL parcial: {pnl_parcial_real:.2f} USDT. Restante: {t['qty_restante']} BTC con SL en breakeven ({nuevo_sl:.2f})")
+                        telegram_mensaje(f"🎯 TP1 #{tid}: +{pnl_parcial_real:.2f} USDT (cerrado {qty_tp1} BTC). Resto con SL en breakeven.")
                         if t['qty_restante'] <= 0.0001:
                             cerrar_ids.append(tid)
                     else:
                         print(f"❌ Falló cierre TP1 #{tid}")
+                else:
+                    print(f"⚠️ TP1 no ejecutable, cantidad demasiado pequeña o resto cero.")
+                    # Si no se puede cerrar, forzamos el cierre total después
+                    t['tp1_ejecutado'] = True
+                    t['breakeven_activado'] = True
+                    t['sl_actual'] = t['entrada'] + (2 if t['decision']=="Sell" else -2)
 
-        # TP2
-        if t['tp1_ejecutado'] and not t['tp2_ejecutado'] and t['tp2'] is not None and t['tp2'] > 0 and t['qty_restante'] > 0.001:
+        # --- TP2: cerrar la posición restante completamente ---
+        if t['tp1_ejecutado'] and not t['tp2_ejecutado'] and t['tp2'] is not None and t['tp2'] > 0:
             if (t['decision']=="Buy" and h >= t['tp2']) or (t['decision']=="Sell" and l <= t['tp2']):
-                qty_cerrar = t['qty_restante']
-                if qty_cerrar >= 0.001:
-                    print(f"🔨 Ejecutando TP2 (cierre total) para #{tid} - Cantidad: {qty_cerrar} BTC")
-                    result = close_position_qty(qty_cerrar, t['decision'])
-                    if result == "already_closed":
-                        t['qty_restante'] = 0
-                        t['tp2_ejecutado'] = True
+                qty_restante = t['qty_restante']
+                if qty_restante >= 0.001:
+                    balance_antes = get_real_balance()
+                    order_result = close_position_qty(qty_restante, t['decision'])
+                    if order_result and order_result != "already_closed":
+                        time.sleep(1)
+                        balance_despues = get_real_balance()
+                        pnl_resto = balance_despues - balance_antes
+                        pnl_total = t['pnl_parcial'] + pnl_resto
+                        REAL_BALANCE = balance_despues
+                        TOTAL_TRADES += 1
+                        if pnl_total > 0:
+                            WIN_COUNT += 1
+                        else:
+                            LOSS_COUNT += 1
+                        TRADE_HISTORY.append(convertir_serializable({
+                            "pnl": pnl_total, "resultado_win": pnl_total > 0, "decision": t['decision'], "razon": t['razon']
+                        }))
                         cerrar_ids.append(tid)
-                        continue
-                    elif result:
-                        for _ in range(5):
-                            time.sleep(0.3)
-                            new_real_size = get_real_position_size()
-                            if new_real_size < t['qty_restante'] - qty_cerrar + 0.0005:
-                                break
-                        ganancia = abs(t['tp2'] - t['entrada']) * qty_cerrar
-                        t['pnl_parcial'] += ganancia
-                        REAL_BALANCE = get_real_balance()
-                        t['qty_restante'] -= qty_cerrar
-                        t['tp2_ejecutado'] = True
-                        print(f"🎯 TP2 real #{tid} +{ganancia:.2f} USDT. Restante: {t['qty_restante']:.3f} BTC")
-                        telegram_mensaje(f"🎯 TP2 #{tid} hit. Cerrado {qty_cerrar} BTC, ganancia +{ganancia:.2f} USDT")
-                        if t['qty_restante'] <= 0.0001:
-                            cerrar_ids.append(tid)
+                        # Mensaje detallado
+                        msg_cierre = (
+                            f"✅ CIERRE COMPLETO #{tid}\n"
+                            f"Dirección: {t['decision']}\n"
+                            f"Entrada: {t['entrada']:.2f}\n"
+                            f"Salida TP2: {t['tp2']:.2f}\n"
+                            f"Cantidad total: {t['qty_original']:.3f} BTC\n"
+                            f"PnL total: {pnl_total:+.2f} USDT\n"
+                            f"Balance actual: {REAL_BALANCE:.2f} USDT\n"
+                            f"Motivo: TP2 alcanzado"
+                        )
+                        print(msg_cierre)
+                        telegram_mensaje(msg_cierre)
+                        reporte_estado()
                     else:
                         print(f"❌ Falló cierre TP2 #{tid}")
-
-        # Trailing / SL
-        cerrar = False
-        motivo = ""
-        if t['tp1_ejecutado']:
-            if t['trailing_logic'] == "EMA20":
-                nuevo_sl = ema
-            else:  # LOW_CANDLE
-                nuevo_sl = l_prev if t['decision'] == "Buy" else h_prev
-            if t['decision'] == "Buy":
-                if nuevo_sl > t['sl_actual']:
-                    t['sl_actual'] = nuevo_sl
-                    print(f"📈 Trailing #{tid} -> SL actualizado a {t['sl_actual']:.2f}")
-                if l <= t['sl_actual']:
-                    cerrar, motivo = True, "Trailing"
-            else:
-                if nuevo_sl < t['sl_actual']:
-                    t['sl_actual'] = nuevo_sl
-                    print(f"📉 Trailing #{tid} -> SL actualizado a {t['sl_actual']:.2f}")
-                if h >= t['sl_actual']:
-                    cerrar, motivo = True, "Trailing"
-        else:
-            if (t['decision'] == "Buy" and l <= t['sl_inicial']) or (t['decision'] == "Sell" and h >= t['sl_inicial']):
-                cerrar, motivo = True, "Stop Loss"
-
-        if cerrar and t['qty_restante'] > 0:
-            real_size = get_real_position_size()
-            if real_size <= 0.0:
-                print(f"⚠️ No hay posición real para #{tid}, se marca como cerrado.")
-                cerrar_ids.append(tid)
-                continue
-            qty_to_close = min(t['qty_restante'], real_size)
-            if qty_to_close < 0.001:
-                print(f"⚠️ Cantidad restante muy pequeña ({qty_to_close}), se cierra el trade.")
-                cerrar_ids.append(tid)
-                continue
-
-            print(f"🔨 Cerrando resto de #{tid} - {qty_to_close} BTC por {motivo}")
-            result = close_position_qty(qty_to_close, t['decision'])
-            if result == "already_closed" or result:
-                close_price = df['close'].iloc[-1]
-                pnl_resto = (close_price - t['entrada']) * qty_to_close if t['decision'] == "Buy" else (t['entrada'] - close_price) * qty_to_close
-                pnl_total = t['pnl_parcial'] + pnl_resto
-                REAL_BALANCE = get_real_balance()
-                TOTAL_TRADES += 1
-                if pnl_total > 0:
-                    WIN_COUNT += 1
                 else:
-                    LOSS_COUNT += 1
-                TRADE_HISTORY.append(convertir_serializable({
-                    "pnl": pnl_total, "resultado_win": pnl_total > 0, "decision": t['decision'], "razon": t['razon']
-                }))
-                cerrar_ids.append(tid)
-                print(f"📤 CERRADO #{tid} ({motivo}) | PnL: {pnl_total:.2f} USDT | Balance: {REAL_BALANCE:.2f}")
-                telegram_mensaje(f"📤 CERRADO #{tid} ({motivo}). PnL: {pnl_total:.2f} USDT")
-                reporte_estado()
-            else:
-                print(f"❌ Falló cierre final #{tid}")
+                    # Si la cantidad restante es menor al mínimo, forzamos cierre por breakeven o stop
+                    cerrar_ids.append(tid)
 
+        # --- Stop Loss (normal o breakeven) ---
+        # Si aún no se alcanzó TP1, se usa el SL original.
+        # Si ya se alcanzó TP1, se usa el SL actualizado (breakeven).
+        if t['qty_restante'] > 0.001:
+            condicion_stop = False
+            if t['decision'] == "Buy" and l <= t['sl_actual']:
+                condicion_stop = True
+            elif t['decision'] == "Sell" and h >= t['sl_actual']:
+                condicion_stop = True
+            
+            if condicion_stop:
+                balance_antes = get_real_balance()
+                order_result = close_position_qty(t['qty_restante'], t['decision'])
+                if order_result and order_result != "already_closed":
+                    time.sleep(1)
+                    balance_despues = get_real_balance()
+                    pnl_resto = balance_despues - balance_antes
+                    pnl_total = t['pnl_parcial'] + pnl_resto
+                    REAL_BALANCE = balance_despues
+                    TOTAL_TRADES += 1
+                    if pnl_total > 0:
+                        WIN_COUNT += 1
+                    else:
+                        LOSS_COUNT += 1
+                    TRADE_HISTORY.append(convertir_serializable({
+                        "pnl": pnl_total, "resultado_win": pnl_total > 0, "decision": t['decision'], "razon": t['razon']
+                    }))
+                    cerrar_ids.append(tid)
+                    motivo = "Stop Loss" if not t.get('breakeven_activado') else "Breakeven (SL)"
+                    msg_cierre = (
+                        f"❌ CIERRE COMPLETO #{tid}\n"
+                        f"Dirección: {t['decision']}\n"
+                        f"Entrada: {t['entrada']:.2f}\n"
+                        f"Salida (stop): {t['sl_actual']:.2f}\n"
+                        f"Cantidad total: {t['qty_original']:.3f} BTC\n"
+                        f"PnL total: {pnl_total:+.2f} USDT\n"
+                        f"Balance actual: {REAL_BALANCE:.2f} USDT\n"
+                        f"Motivo: {motivo}"
+                    )
+                    print(msg_cierre)
+                    telegram_mensaje(msg_cierre)
+                    reporte_estado()
+                else:
+                    print(f"❌ Falló cierre por stop #{tid}")
+
+    # Eliminar trades cerrados
     for tid in cerrar_ids:
         del REAL_ACTIVE_TRADES[tid]
 
+    # Aprendizaje cada 10 trades
     if TOTAL_TRADES > 0 and TOTAL_TRADES % 10 == 0 and TOTAL_TRADES != ULTIMO_APRENDIZAJE:
         aprender_de_trades()
 
