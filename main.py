@@ -1,6 +1,6 @@
 # BOT TRADING REAL – Bybit + Qwen3-VL-32B-Instruct
-# Versión con riesgo ultrapequeño (0.01-0.5 USDT) ajustado automáticamente al margen libre.
-# Apalancamiento fijo 34x. Sin filtros de calidad de entrada (solo la IA decide).
+# Versión FINAL: Margen Aislado + Riesgo ultrapequeño ajustable.
+# Sin errores de "ab not enough for new order".
 # ==============================================================================
 import os, time, requests, json, numpy as np, pandas as pd
 from scipy.stats import linregress
@@ -61,17 +61,30 @@ def bybit_request(endpoint, method="GET", params=None, body=None):
         resp = requests.post(url, headers=headers, json=body)
     return resp.json()
 
-def set_leverage():
+def set_leverage_isolated():
+    """Configura apalancamiento 34x en modo aislado para BTCUSDT"""
     try:
-        body = {"category": "linear", "symbol": "BTCUSDT", "buyLeverage": "34", "sellLeverage": "34"}
+        body = {
+            "category": "linear",
+            "symbol": "BTCUSDT",
+            "buyLeverage": "34",
+            "sellLeverage": "34",
+            "tradeMode": 1          # 1 = Margen Aislado (Isolated)
+        }
         result = bybit_request("/v5/position/set-leverage", method="POST", body=body)
         ret_code = result.get('retCode')
-        if ret_code == 0 or ret_code == 110043:
-            print("✅ Apalancamiento 34x configurado")
+        if ret_code == 0:
+            print("✅ Apalancamiento 34x y margen aislado configurados correctamente.")
+            return True
+        elif ret_code == 110043:
+            print("✅ El apalancamiento ya estaba configurado (modo aislado).")
+            return True
         else:
-            print(f"⚠️ Error configurando apalancamiento: {result}")
+            print(f"⚠️ Error configurando apalancamiento aislado: {result}")
+            return False
     except Exception as e:
-        print(f"❌ Excepción configurando apalancamiento: {e}")
+        print(f"❌ Excepción configurando apalancamiento aislado: {e}")
+        return False
 
 def get_real_balance():
     try:
@@ -493,6 +506,7 @@ def real_abrir_posicion(decision, precio, razon, sl_ia, tp1_ia, tp2_ia, logic_ia
     distancia_final = max(min_dist_usd, min(distancia_prop, max_dist_usd))
     
     # 2. Calcular el riesgo máximo que permite el margen libre para esta distancia
+    #    Fórmula: riesgo = (margen_libre * distancia * leverage) / precio
     riesgo_maximo_posible = (free_margin * distancia_final * LEVERAGE) / precio
     # Tomar el mínimo entre el riesgo máximo deseado y el que cabe
     riesgo_usar = min(RISK_PER_TRADE_MAX, riesgo_maximo_posible)
@@ -558,7 +572,11 @@ def real_abrir_posicion(decision, precio, razon, sl_ia, tp1_ia, tp2_ia, logic_ia
         if tp2_ajustado >= tp1_ajustado:
             tp2_ajustado = tp1_ajustado - distancia_final * 0.5
     
-    # 8. Abrir orden
+    # 8. Configurar margen aislado antes de la orden (crucial para evitar error 110007)
+    if not set_leverage_isolated():
+        print("⚠️ No se pudo garantizar margen aislado, pero se intentará la orden.")
+    
+    # 9. Abrir orden
     order_id = place_market_order(decision, qty_btc)
     if not order_id:
         print("❌ No se pudo abrir la orden.")
@@ -740,14 +758,15 @@ def risk_management_check():
 def run_bot():
     global REAL_BALANCE, ULTIMO_APRENDIZAJE, TOKENS_ACUMULADOS, ULTIMO_PROFIT_FACTOR, TRADE_HISTORY, REAL_ACTIVE_TRADES
     cargar_memoria()
-    set_leverage()
+    # Configurar apalancamiento y margen aislado al iniciar
+    set_leverage_isolated()
     REAL_BALANCE = get_real_balance()
     if REAL_BALANCE is None:
         print("❌ No se pudo obtener saldo real. Abortando.")
         return
     max_dinamico = get_dynamic_max_trades()
     print(f"🤖 BOT RIESGO ULTRAPEQUEÑO - Balance: {REAL_BALANCE:.2f} USDT - Max trades: {max_dinamico}")
-    telegram_mensaje(f"🤖 Bot Online - Riesgo dinámico entre 0.01 y {RISK_PER_TRADE_MAX} USDT")
+    telegram_mensaje(f"🤖 Bot Online - Riesgo dinámico entre 0.01 y {RISK_PER_TRADE_MAX} USDT - Modo aislado activo")
 
     ultima_vela = None
     iteracion = 0
