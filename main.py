@@ -1,6 +1,6 @@
 # BOT TRADING REAL – Bybit + Qwen3-VL-32B-Instruct
-# Versión FINAL: Margen Aislado + Riesgo ultrapequeño ajustable.
-# Sin errores de "ab not enough for new order".
+# Versión definitiva con gestión de riesgo adaptativa y validación de entradas cerca de S/R/EMA.
+# Riesgo dinámico (máx 3 USDT). SL ajustado por ATR y margen disponible.
 # ==============================================================================
 import os, time, requests, json, numpy as np, pandas as pd
 from scipy.stats import linregress
@@ -61,30 +61,17 @@ def bybit_request(endpoint, method="GET", params=None, body=None):
         resp = requests.post(url, headers=headers, json=body)
     return resp.json()
 
-def set_leverage_isolated():
-    """Configura apalancamiento 34x en modo aislado para BTCUSDT"""
+def set_leverage():
     try:
-        body = {
-            "category": "linear",
-            "symbol": "BTCUSDT",
-            "buyLeverage": "34",
-            "sellLeverage": "34",
-            "tradeMode": 1          # 1 = Margen Aislado (Isolated)
-        }
+        body = {"category": "linear", "symbol": "BTCUSDT", "buyLeverage": "34", "sellLeverage": "34"}
         result = bybit_request("/v5/position/set-leverage", method="POST", body=body)
         ret_code = result.get('retCode')
-        if ret_code == 0:
-            print("✅ Apalancamiento 34x y margen aislado configurados correctamente.")
-            return True
-        elif ret_code == 110043:
-            print("✅ El apalancamiento ya estaba configurado (modo aislado).")
-            return True
+        if ret_code == 0 or ret_code == 110043:
+            print("✅ Apalancamiento 34x configurado")
         else:
-            print(f"⚠️ Error configurando apalancamiento aislado: {result}")
-            return False
+            print(f"⚠️ Error configurando apalancamiento: {result}")
     except Exception as e:
-        print(f"❌ Excepción configurando apalancamiento aislado: {e}")
-        return False
+        print(f"❌ Excepción configurando apalancamiento: {e}")
 
 def get_real_balance():
     try:
@@ -264,8 +251,7 @@ def parse_json_seguro(raw):
 # =================== CONFIGURACIÓN DEL BOT ===================
 SYMBOL = "BTCUSDT"
 INTERVAL = "5"
-RISK_PER_TRADE_MAX = 3.0      # Riesgo máximo deseado (se reducirá si no cabe)
-RISK_PER_TRADE_MIN = 0.01     # Riesgo mínimo aceptable (0.01 USDT)
+RISK_PER_TRADE_MAX = 3.0      # Máximo riesgo por operación (USD)
 LEVERAGE = 34
 SLEEP_SECONDS = 60
 GRAFICO_VELAS_LIMIT = 120
@@ -447,7 +433,171 @@ Responde ÚNICAMENTE con un JSON en una línea, sin texto adicional, con esta es
         print(f"❌ Error en IA: {e}")
         return "Hold", "Error API", 0, 0, 0, "BREAKEVEN"
 
-# =================== FUNCIONES AUXILIARES ===================
+# =================== GESTIÓN ADAPTATIVA DE RIESGO Y VALIDACIÓN ===================
+def calcular_riesgo_dinamico(free_margin):
+    """
+    Ajusta el riesgo por operación según el margen libre disponible.
+    Máximo 3 USDT, pero si el margen es bajo, se reduce para que el SL no sea excesivamente grande.
+    """
+    if free_margin >= 20:
+        return RISK_PER_TRADE_MAX
+    elif free_margin >= 10:
+        return 1.5
+    else:
+        return 1.0
+
+def validar_calidad_entrada(decision, precio, soporte, resistencia, ema20):
+    """
+    Verifica que el precio esté cerca de un nivel significativo (soporte/resistencia o EMA20)
+    para que el stop loss pueda ser ajustado y la operación tenga sentido.
+    Distancia máxima permitida: 0.3% del precio.
+    """
+    tolerancia = precio * 0.003  # 0.3%
+    if decision == "Buy":
+        # Para compra, queremos precio cerca del soporte o EMA (actuando como soporte)
+        cerca_soporte = abs(precio - soporte) <= tolerancia if soporte > 0 else False
+        cerca_ema = abs(precio - ema20) <= tolerancia if ema20 > 0 else False
+        return cerca_soporte or cerca_ema
+    elif decision == "Sell":
+        cerca_resistencia = abs(resistencia - precio) <= tolerancia if resistencia > 0 else False
+        cerca_ema = abs(ema20 - precio) <= tolerancia if ema20 > 0 else False
+        return cerca_resistencia or cerca_ema
+    return False
+
+def real_abrir_posicion(decision, precio, razon, sl_ia, tp1_ia, tp2_ia, logic_ia, df, sop, res, slo, inter):
+    global REAL_BALANCE, TRADE_COUNTER, REAL_ACTIVE_TRADES
+    max_trades = get_dynamic_max_trades()
+    if len(REAL_ACTIVE_TRADES) >= max_trades:
+        print(f"⚠️ Máximo dinámico de trades ({max_trades}) alcanzado.")
+        return
+
+    if REAL_BALANCE is None:
+        REAL_BALANCE = get_real_balance()
+        if REAL_BALANCE is None:
+            return
+
+    free_margin = get_free_margin()
+    if free_margin <= 0:
+        print("❌ Margen libre insuficiente o nulo.")
+        return
+
+    # 1. Riesgo dinámico según margen
+    risk_per_trade = calcular_riesgo_dinamico(free_margin)
+    if risk_per_trade < 1.0:
+        print(f"⚠️ Margen muy bajo ({free_margin:.2f} USDT). Riesgo reducido a {risk_per_trade} USDT.")
+    else:
+        print(f"💰 Riesgo fijado en {risk_per_trade} USDT (margen libre: {free_margin:.2f})")
+
+    # 2. Obtener ATR y límites de distancia
+    atr_valor = df['atr'].iloc[-1] if not df.empty and 'atr' in df else precio * 0.003
+    min_dist_pct = max(MIN_SL_DIST_PCT, (atr_valor * 0.6) / precio)  # al menos 0.15% o 0.6*ATR
+    max_dist_pct = min(MAX_SL_DIST_PCT, (atr_valor * 1.2) / precio)  # máximo 0.5% o 1.2*ATR
+    min_dist_usd = precio * min_dist_pct
+    max_dist_usd = precio * max_dist_pct
+
+    # 3. Procesar distancia propuesta por IA
+    if decision == "Buy":
+        distancia_propuesta = precio - sl_ia if sl_ia and sl_ia > 0 else min_dist_usd
+    else:
+        distancia_propuesta = sl_ia - precio if sl_ia and sl_ia > 0 else min_dist_usd
+
+    # Aplicar límites
+    distancia_final = max(min_dist_usd, min(distancia_propuesta, max_dist_usd))
+    if distancia_final != distancia_propuesta:
+        print(f"⚠️ Distancia al SL ajustada: de {distancia_propuesta:.1f} a {distancia_final:.1f} USD (rango {min_dist_usd:.1f}-{max_dist_usd:.1f})")
+
+    # 4. Calcular cantidad basada en riesgo y distancia
+    qty_btc = risk_per_trade / distancia_final
+    max_qty = (REAL_BALANCE * LEVERAGE) / precio
+    qty_btc = min(qty_btc, max_qty)
+    if qty_btc < 0.001:
+        print(f"⚠️ Cantidad muy pequeña ({qty_btc:.4f} BTC). No se abre.")
+        return
+
+    # 5. Verificar que el margen necesario quepa en el margen libre
+    margen_necesario = (qty_btc * precio) / LEVERAGE
+    if margen_necesario > free_margin * 0.98:  # 2% de buffer
+        print(f"❌ Margen insuficiente: necesario {margen_necesario:.2f} USDT > libre {free_margin:.2f} USDT.")
+        print(f"   Intente reducir el riesgo o aumentar el margen. Distancia SL: {distancia_final:.1f} USD, qty: {qty_btc:.3f} BTC.")
+        return
+
+    # 6. Validar calidad de entrada (cerca de soporte/resistencia o EMA)
+    ema20_actual = df['ema20'].iloc[-1] if not df.empty and 'ema20' in df else 0
+    if not validar_calidad_entrada(decision, precio, sop, res, ema20_actual):
+        print(f"❌ Entrada rechazada: precio {precio:.2f} no está cerca de soporte/resistencia/EMA (tolerancia 0.3%).")
+        return
+
+    # 7. Calcular SL definitivo
+    if decision == "Buy":
+        sl_ajustado = precio - distancia_final
+    else:
+        sl_ajustado = precio + distancia_final
+
+    if (decision == "Buy" and sl_ajustado >= precio) or (decision == "Sell" and sl_ajustado <= precio):
+        print("⚠️ Stop loss inválido. No se abre.")
+        return
+
+    # 8. Recalcular TP1 y TP2 con ratios mínimos
+    tp1_min_dist = distancia_final * MIN_RISK_REWARD_TP1
+    tp2_min_dist = distancia_final * MIN_RISK_REWARD_TP2
+
+    if decision == "Buy":
+        tp1_original = tp1_ia if tp1_ia and tp1_ia > precio else precio + tp1_min_dist
+        tp2_original = tp2_ia if tp2_ia and tp2_ia > tp1_original else precio + tp2_min_dist
+        tp1_ajustado = max(tp1_original, precio + tp1_min_dist)
+        tp2_ajustado = max(tp2_original, precio + tp2_min_dist)
+        if tp2_ajustado <= tp1_ajustado:
+            tp2_ajustado = tp1_ajustado + distancia_final * 0.5
+    else:
+        tp1_original = tp1_ia if tp1_ia and tp1_ia < precio else precio - tp1_min_dist
+        tp2_original = tp2_ia if tp2_ia and tp2_ia < tp1_original else precio - tp2_min_dist
+        tp1_ajustado = min(tp1_original, precio - tp1_min_dist)
+        tp2_ajustado = min(tp2_original, precio - tp2_min_dist)
+        if tp2_ajustado >= tp1_ajustado:
+            tp2_ajustado = tp1_ajustado - distancia_final * 0.5
+
+    # 9. Redondear cantidad y cumplir mínimo nocional (100 USDT)
+    qty_btc = round(qty_btc, 3)
+    nocional = qty_btc * precio
+    if nocional < 100.0:
+        qty_btc = round(100.0 / precio, 3)
+        print(f"⚠️ Ajustado a nocional mínimo: {qty_btc} BTC (nominal ~{qty_btc*precio:.2f} USDT)")
+        # Recalcular margen
+        margen_necesario = (qty_btc * precio) / LEVERAGE
+        if margen_necesario > free_margin:
+            print(f"❌ Tras ajuste por nocional, margen excedido. Cancelado.")
+            return
+
+    # 10. Abrir orden
+    order_id = place_market_order(decision, qty_btc)
+    if not order_id:
+        print("❌ No se pudo abrir la orden.")
+        return
+
+    TRADE_COUNTER += 1
+    qty_tp1 = round(qty_btc * TP1_PERCENT, 3)
+    qty_restante = round(qty_btc - qty_tp1, 3)
+    t = {
+        "id": TRADE_COUNTER, "decision": decision, "entrada": precio,
+        "sl_inicial": sl_ajustado, "sl_actual": sl_ajustado,
+        "tp1": tp1_ajustado, "tp2": tp2_ajustado, "trailing_logic": "BREAKEVEN",
+        "qty_original": qty_btc, "qty_restante": qty_restante,
+        "tp1_ejecutado": False, "tp2_ejecutado": False, "pnl_parcial": 0.0,
+        "razon": razon, "order_id": order_id, "breakeven_activado": False
+    }
+    REAL_ACTIVE_TRADES[TRADE_COUNTER] = t
+    msg = (f"🚀 [#{TRADE_COUNTER}] {decision} REAL en {precio:.2f} | Qty {qty_btc} BTC (riesgo {risk_per_trade} USDT)\n"
+           f"SL: {sl_ajustado:.2f} (dist {distancia_final:.1f} USDT)\n"
+           f"TP1: {tp1_ajustado:.2f} | TP2: {tp2_ajustado:.2f}\n"
+           f"Razón: {razon}\nMargen usado: {margen_necesario:.2f} / {free_margin:.2f} USDT")
+    print(msg)
+    telegram_mensaje(msg)
+
+    img_completa = generar_grafico_para_vision(df, sop, res, slo, inter, precio)
+    img_completa.save("/tmp/in_completo.png")
+    telegram_enviar_imagen("/tmp/in_completo.png", msg)
+
+# =================== GESTIÓN DE TRADES ACTIVOS (SL/TP) ===================
 def sync_active_trades_with_bybit():
     global REAL_ACTIVE_TRADES
     real_size = get_real_position_size()
@@ -476,138 +626,6 @@ def get_dynamic_max_trades():
         max_by_balance = 1
     return min(MAX_CONCURRENT_TRADES, max_by_balance)
 
-# =================== APERTURA DE OPERACIONES CON RIESGO ULTRAPEQUEÑO ===================
-def real_abrir_posicion(decision, precio, razon, sl_ia, tp1_ia, tp2_ia, logic_ia, df, sop, res, slo, inter):
-    global REAL_BALANCE, TRADE_COUNTER, REAL_ACTIVE_TRADES
-    max_trades = get_dynamic_max_trades()
-    if len(REAL_ACTIVE_TRADES) >= max_trades:
-        print(f"⚠️ Máximo dinámico de trades ({max_trades}) alcanzado.")
-        return
-
-    if REAL_BALANCE is None:
-        REAL_BALANCE = get_real_balance()
-        if REAL_BALANCE is None:
-            return
-
-    free_margin = get_free_margin()
-    if free_margin <= 0:
-        print("❌ Margen libre insuficiente o nulo.")
-        return
-
-    # 1. Obtener distancia al stop loss (priorizar IA, luego límites)
-    atr_valor = df['atr'].iloc[-1] if not df.empty and 'atr' in df else precio * 0.003
-    min_dist_usd = max(precio * MIN_SL_DIST_PCT, atr_valor * 0.5)
-    max_dist_usd = min(precio * MAX_SL_DIST_PCT, atr_valor * 1.5)
-    
-    if decision == "Buy":
-        distancia_prop = (precio - sl_ia) if sl_ia and sl_ia > 0 else min_dist_usd
-    else:
-        distancia_prop = (sl_ia - precio) if sl_ia and sl_ia > 0 else min_dist_usd
-    distancia_final = max(min_dist_usd, min(distancia_prop, max_dist_usd))
-    
-    # 2. Calcular el riesgo máximo que permite el margen libre para esta distancia
-    #    Fórmula: riesgo = (margen_libre * distancia * leverage) / precio
-    riesgo_maximo_posible = (free_margin * distancia_final * LEVERAGE) / precio
-    # Tomar el mínimo entre el riesgo máximo deseado y el que cabe
-    riesgo_usar = min(RISK_PER_TRADE_MAX, riesgo_maximo_posible)
-    # Asegurar que no sea menor que el mínimo permitido
-    if riesgo_usar < RISK_PER_TRADE_MIN:
-        print(f"❌ Riesgo calculado {riesgo_usar:.4f} USDT es menor al mínimo {RISK_PER_TRADE_MIN}. No se abre.")
-        return
-    
-    # 3. Calcular cantidad teórica
-    qty_btc = riesgo_usar / distancia_final
-    
-    # 4. Ajustar por nocional mínimo de Bybit (100 USDT)
-    nocional = qty_btc * precio
-    if nocional < 100.0:
-        qty_btc_necesaria = 100.0 / precio
-        # El riesgo real aumentará porque la cantidad es mayor
-        riesgo_real = qty_btc_necesaria * distancia_final
-        if riesgo_real > RISK_PER_TRADE_MAX:
-            print(f"⚠️ Para cumplir nocional mínimo, el riesgo sería {riesgo_real:.2f} USDT (> máx {RISK_PER_TRADE_MAX}). Abortando.")
-            return
-        # Verificar que el margen para esta nueva cantidad no supere el libre
-        margen_necesario = (qty_btc_necesaria * precio) / LEVERAGE
-        if margen_necesario > free_margin + 0.01:
-            print(f"❌ Nocional mínimo requiere margen {margen_necesario:.2f} > libre {free_margin:.2f}. Cancelado.")
-            return
-        qty_btc = qty_btc_necesaria
-        riesgo_usar = riesgo_real
-        print(f"⚠️ Ajustado por nocional mínimo: qty={qty_btc:.4f} BTC, riesgo real={riesgo_usar:.4f} USDT")
-    
-    # 5. Validar cantidad mínima (0.001 BTC)
-    if qty_btc < 0.001:
-        print(f"⚠️ Cantidad {qty_btc:.4f} BTC es menor a 0.001. No se abre.")
-        return
-    
-    qty_btc = round(qty_btc, 3)
-    
-    # 6. Calcular SL final
-    if decision == "Buy":
-        sl_ajustado = precio - distancia_final
-    else:
-        sl_ajustado = precio + distancia_final
-        
-    if (decision == "Buy" and sl_ajustado >= precio) or (decision == "Sell" and sl_ajustado <= precio):
-        print("⚠️ Stop loss inválido. No se abre.")
-        return
-    
-    # 7. Recalcular TP1 y TP2 con ratios mínimos
-    tp1_min_dist = distancia_final * MIN_RISK_REWARD_TP1
-    tp2_min_dist = distancia_final * MIN_RISK_REWARD_TP2
-    
-    if decision == "Buy":
-        tp1_original = tp1_ia if tp1_ia and tp1_ia > precio else precio + tp1_min_dist
-        tp2_original = tp2_ia if tp2_ia and tp2_ia > tp1_original else precio + tp2_min_dist
-        tp1_ajustado = max(tp1_original, precio + tp1_min_dist)
-        tp2_ajustado = max(tp2_original, precio + tp2_min_dist)
-        if tp2_ajustado <= tp1_ajustado:
-            tp2_ajustado = tp1_ajustado + distancia_final * 0.5
-    else:
-        tp1_original = tp1_ia if tp1_ia and tp1_ia < precio else precio - tp1_min_dist
-        tp2_original = tp2_ia if tp2_ia and tp2_ia < tp1_original else precio - tp2_min_dist
-        tp1_ajustado = min(tp1_original, precio - tp1_min_dist)
-        tp2_ajustado = min(tp2_original, precio - tp2_min_dist)
-        if tp2_ajustado >= tp1_ajustado:
-            tp2_ajustado = tp1_ajustado - distancia_final * 0.5
-    
-    # 8. Configurar margen aislado antes de la orden (crucial para evitar error 110007)
-    if not set_leverage_isolated():
-        print("⚠️ No se pudo garantizar margen aislado, pero se intentará la orden.")
-    
-    # 9. Abrir orden
-    order_id = place_market_order(decision, qty_btc)
-    if not order_id:
-        print("❌ No se pudo abrir la orden.")
-        return
-    
-    TRADE_COUNTER += 1
-    qty_tp1 = round(qty_btc * TP1_PERCENT, 3)
-    qty_restante = round(qty_btc - qty_tp1, 3)
-    t = {
-        "id": TRADE_COUNTER, "decision": decision, "entrada": precio,
-        "sl_inicial": sl_ajustado, "sl_actual": sl_ajustado,
-        "tp1": tp1_ajustado, "tp2": tp2_ajustado, "trailing_logic": "BREAKEVEN",
-        "qty_original": qty_btc, "qty_restante": qty_restante,
-        "tp1_ejecutado": False, "tp2_ejecutado": False, "pnl_parcial": 0.0,
-        "razon": razon, "order_id": order_id, "breakeven_activado": False
-    }
-    REAL_ACTIVE_TRADES[TRADE_COUNTER] = t
-    
-    msg = (f"🚀 [#{TRADE_COUNTER}] {decision} en {precio:.2f}\n"
-           f"💰 Riesgo efectivo: {riesgo_usar:.3f} USDT | SL dist: {distancia_final:.1f} USD\n"
-           f"📊 Qty: {qty_btc} BTC | Margen: {(qty_btc*precio)/LEVERAGE:.2f} USDT\n"
-           f"🎯 SL: {sl_ajustado:.2f} | TP1: {tp1_ajustado:.2f} | TP2: {tp2_ajustado:.2f}\n"
-           f"📝 {razon}")
-    print(msg)
-    telegram_mensaje(msg)
-    
-    img_completa = generar_grafico_para_vision(df, sop, res, slo, inter, precio)
-    img_completa.save("/tmp/in_completo.png")
-    telegram_enviar_imagen("/tmp/in_completo.png", msg)
-
-# =================== GESTIÓN DE TRADES ACTIVOS (SL/TP) ===================
 def real_revisar_sl_tp(df):
     global REAL_BALANCE, WIN_COUNT, LOSS_COUNT, TOTAL_TRADES, TRADE_HISTORY, REAL_ACTIVE_TRADES
     sync_active_trades_with_bybit()
@@ -616,6 +634,7 @@ def real_revisar_sl_tp(df):
 
     h = df['high'].iloc[-1]
     l = df['low'].iloc[-1]
+    precio_cierre = df['close'].iloc[-1]
 
     cerrar_ids = []
     for tid, t in list(REAL_ACTIVE_TRADES.items()):
@@ -633,16 +652,16 @@ def real_revisar_sl_tp(df):
                         t['breakeven_activado'] = True
                         offset = 2.0
                         t['sl_actual'] = t['entrada'] - offset if t['decision']=="Buy" else t['entrada'] + offset
-                        print(f"🎯 TP1 #{tid}: +{pnl_parcial:.2f} USDT. Restante {t['qty_restante']} BTC, SL breakeven en {t['sl_actual']:.2f}")
-                        telegram_mensaje(f"🎯 TP1 #{tid}: +{pnl_parcial:.2f} USDT (cerrado {qty_tp1} BTC)")
+                        print(f"🎯 TP1 confirmado #{tid}. PnL parcial: {pnl_parcial:.2f} USDT. Restante: {t['qty_restante']} BTC, SL breakeven en {t['sl_actual']:.2f}")
+                        telegram_mensaje(f"🎯 TP1 #{tid}: +{pnl_parcial:.2f} USDT (cerrado {qty_tp1} BTC). Resto con SL breakeven.")
                         if t['qty_restante'] <= 0.0001:
                             cerrar_ids.append(tid)
                     else:
-                        print(f"⚠️ TP1 no confirmado #{tid}")
+                        print(f"⚠️ TP1 no confirmado para #{tid}, se reintentará después")
                 else:
                     cerrar_ids.append(tid)
 
-        # TP2
+        # TP2 (cierre completo)
         if t['tp1_ejecutado'] and not t['tp2_ejecutado'] and t['tp2'] is not None and t['tp2'] > 0 and t['qty_restante'] > 0:
             if (t['decision']=="Buy" and h >= t['tp2']) or (t['decision']=="Sell" and l <= t['tp2']):
                 qty_restante = t['qty_restante']
@@ -661,9 +680,9 @@ def real_revisar_sl_tp(df):
                             "pnl": pnl_total, "resultado_win": pnl_total > 0, "decision": t['decision'], "razon": t['razon']
                         }))
                         cerrar_ids.append(tid)
-                        msg = f"✅ CIERRE COMPLETO #{tid} por TP2\nPnL: {pnl_total:+.2f} USDT\nBalance: {REAL_BALANCE:.2f}"
-                        print(msg)
-                        telegram_mensaje(msg)
+                        msg_cierre = f"✅ CIERRE COMPLETO #{tid}\nDirección: {t['decision']}\nEntrada: {t['entrada']:.2f}\nSalida TP2: {t['tp2']:.2f}\nPnL total: {pnl_total:+.2f} USDT\nBalance: {REAL_BALANCE:.2f}"
+                        print(msg_cierre)
+                        telegram_mensaje(msg_cierre)
                         reporte_estado()
                     else:
                         print(f"❌ Falló cierre TP2 #{tid}")
@@ -695,13 +714,13 @@ def real_revisar_sl_tp(df):
                             "pnl": pnl_total, "resultado_win": pnl_total > 0, "decision": t['decision'], "razon": t['razon']
                         }))
                         cerrar_ids.append(tid)
-                        motivo = "SL inicial" if not t.get('breakeven_activado') else "Breakeven"
-                        msg = f"❌ CIERRE #{tid} por {motivo}\nPnL: {pnl_total:+.2f} USDT"
-                        print(msg)
-                        telegram_mensaje(msg)
+                        motivo = "Stop Loss inicial" if not t.get('breakeven_activado') else "Breakeven (SL)"
+                        msg_cierre = f"❌ CIERRE #{tid} por {motivo}\nEntrada: {t['entrada']:.2f}\nSalida: {t['sl_actual']:.2f}\nPnL: {pnl_total:+.2f} USDT"
+                        print(msg_cierre)
+                        telegram_mensaje(msg_cierre)
                         reporte_estado()
                     else:
-                        print(f"❌ Falló cierre stop #{tid}")
+                        print(f"❌ Falló cierre por stop #{tid}")
                 else:
                     cerrar_ids.append(tid)
 
@@ -720,7 +739,7 @@ def aprender_de_trades():
         per = abs(sum(t['pnl'] for t in ult if t['pnl']<0))
         ULTIMO_PROFIT_FACTOR = gan/per if per>0 else 1.0
         winrate = (WIN_COUNT / TOTAL_TRADES * 100) if TOTAL_TRADES > 0 else 0
-        resumen = f"📊 **APRENDIZAJE #{TOTAL_TRADES}**\nWinrate: {winrate:.1f}%\nProfit Factor: {ULTIMO_PROFIT_FACTOR:.2f}"
+        resumen = f"📊 **APRENDIZAJE #{TOTAL_TRADES}**\nWinrate: {winrate:.1f}%\nProfit Factor: {ULTIMO_PROFIT_FACTOR:.2f}\nGanancias: {gan:.2f}\nPérdidas: {per:.2f}"
         telegram_mensaje(resumen)
         try:
             ult_serial = convertir_serializable(ult)
@@ -728,10 +747,11 @@ def aprender_de_trades():
             resp = client.chat.completions.create(model=MODELO_VISION, messages=[{"role":"user","content":prompt}], timeout=10)
             REGLAS_APRENDIDAS = resp.choices[0].message.content
             telegram_mensaje(f"🧠 Lección IA: {REGLAS_APRENDIDAS}")
-        except:
-            pass
+            print(f"🧠 APRENDIZAJE: {REGLAS_APRENDIDAS}")
+        except Exception as e:
+            print(f"⚠️ No se pudo obtener lección IA: {e}")
     except Exception as e:
-        print(f"Error aprendizaje: {e}")
+        print(f"❌ Error en aprendizaje: {e}")
     finally:
         ULTIMO_APRENDIZAJE = TOTAL_TRADES
         guardar_memoria()
@@ -751,22 +771,21 @@ def risk_management_check():
         drawdown = (REAL_BALANCE - DAILY_START_BALANCE) / DAILY_START_BALANCE
         if drawdown <= -MAX_DAILY_DRAWDOWN_PCT:
             STOPPED_TODAY = True
-            print(f"🚨 Drawdown diario superado. Operaciones detenidas.")
+            print(f"🚨 Drawdown diario superado ({MAX_DAILY_DRAWDOWN_PCT*100}%). Operaciones detenidas hasta mañana.")
     return not STOPPED_TODAY
 
 # =================== LOOP PRINCIPAL ===================
 def run_bot():
     global REAL_BALANCE, ULTIMO_APRENDIZAJE, TOKENS_ACUMULADOS, ULTIMO_PROFIT_FACTOR, TRADE_HISTORY, REAL_ACTIVE_TRADES
     cargar_memoria()
-    # Configurar apalancamiento y margen aislado al iniciar
-    set_leverage_isolated()
+    set_leverage()
     REAL_BALANCE = get_real_balance()
     if REAL_BALANCE is None:
         print("❌ No se pudo obtener saldo real. Abortando.")
         return
     max_dinamico = get_dynamic_max_trades()
-    print(f"🤖 BOT RIESGO ULTRAPEQUEÑO - Balance: {REAL_BALANCE:.2f} USDT - Max trades: {max_dinamico}")
-    telegram_mensaje(f"🤖 Bot Online - Riesgo dinámico entre 0.01 y {RISK_PER_TRADE_MAX} USDT - Modo aislado activo")
+    print(f"🤖 BOT REAL CORREGIDO - Balance: {REAL_BALANCE:.2f} USDT - Max trades: {max_dinamico}")
+    telegram_mensaje(f"🤖 Bot Real Definitivo Online - Balance: {REAL_BALANCE:.2f} USDT - Riesgo ajustable máx 3 USDT")
 
     ultima_vela = None
     iteracion = 0
@@ -796,25 +815,26 @@ def run_bot():
                     sop, res, slo, inter, t, m = detectar_zonas_mercado(df)
                     img = generar_grafico_para_vision(df, sop, res, slo, inter, precio_actual)
                     dec, raz, sl, tp1, tp2, log = analizar_con_qwen(img)
-                    print(f"🤖 IA: {dec} - {raz}")
+                    print(f"🤖 Decisión IA: {dec} - Razón: {raz}")
                     if dec in ["Buy","Sell"]:
                         real_abrir_posicion(dec, precio_actual, raz, sl, tp1, tp2, log, df, sop, res, slo, inter)
                     else:
-                        print(f"⏸️ IA dice HOLD: {raz[:100]}")
+                        print(f"⏸️ IA decidió HOLD. Motivo: {raz[:100]}")
                 ultima_vela = vela_c
             else:
                 if ultima_vela == vela_c:
-                    print("⏳ Misma vela, no repite análisis.")
+                    print("⏳ Misma vela, no se repite análisis.")
                 else:
-                    print(f"⏸️ Límite de trades alcanzado ({len(REAL_ACTIVE_TRADES)}/{max_trades_actual})")
+                    print(f"⏸️ Límite dinámico de trades alcanzado ({len(REAL_ACTIVE_TRADES)}/{max_trades_actual})")
 
             if REAL_ACTIVE_TRADES:
+                print("🔎 Revisando trades activos...")
                 real_revisar_sl_tp(df)
 
             if iteracion % 10 == 0:
                 reporte_estado()
                 winrate = (WIN_COUNT / TOTAL_TRADES * 100) if TOTAL_TRADES > 0 else 0
-                print(f"📈 Balance={REAL_BALANCE:.2f} | Trades={TOTAL_TRADES} | Winrate={winrate:.1f}% | PF={ULTIMO_PROFIT_FACTOR:.2f}")
+                print(f"📈 RESUMEN: Balance={REAL_BALANCE:.2f} | Trades={TOTAL_TRADES} | Winrate={winrate:.1f}% | PF={ULTIMO_PROFIT_FACTOR:.2f}")
 
             time.sleep(SLEEP_SECONDS)
         except Exception as e:
